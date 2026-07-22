@@ -33,7 +33,3 @@
 # canonical release/support-matrix links added by the version bump 404 from CI
 # until then. Remove this entry once the v1.3.0 release is published.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.3\.0$
-
-# This example is introduced by the same PR as its docs link, so the main-branch
-# URL returns 404 until merge.
-^https://github\.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget$
