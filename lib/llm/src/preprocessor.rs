@@ -2844,11 +2844,13 @@ impl OpenAIPreprocessor {
                         if choice.delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
                             state.saw_tool_call = true;
                         }
-                        if matches!(
-                            choice.finish_reason,
-                            Some(dynamo_protocols::types::FinishReason::Length)
-                        ) && !state.saw_tool_call
-                        {
+                        // Recover even when an earlier tool call was already parsed:
+                    // if max_tokens truncates inside a second <tool_call>, the
+                    // jail drops it silently regardless of state.saw_tool_call.
+                    if matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    ) {
                             let dropped = state
                                 .input_text
                                 .get(state.emitted_content_len..)

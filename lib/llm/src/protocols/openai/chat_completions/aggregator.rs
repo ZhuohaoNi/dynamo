@@ -388,6 +388,28 @@ impl DeltaAggregator {
                 // (tool_choice=required/named or structural-tag, gated by
                 // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
                 // keep the v1 finalize path.
+                // For glm47 on length finish: extract the truncated tail BEFORE parsing
+                // so we can emit it even when earlier tool calls were fully parsed.
+                // A second <tool_call> block truncated after a complete first one would
+                // otherwise be silently dropped by the parser.
+                let glm47_truncated_tail = if parser == "glm47"
+                    && matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    ) {
+                    // Find the last incomplete <tool_call> block (no matching </tool_call>).
+                    choice.text.rfind("<tool_call>").and_then(|start| {
+                        let tail = &choice.text[start..];
+                        if !tail.contains("</tool_call>") {
+                            Some(tail.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+
                 let parse_result = if super::tool_parser_v2::enabled()
                     && super::tool_parser_v2::supports_family(parser)
                     && parsing_options.experimental_v2_batch_eligible
@@ -416,6 +438,7 @@ impl DeltaAggregator {
                             .map(super::tool_call_response_to_protocol)
                             .collect(),
                     );
+                    // Start with prose before tool calls (may be empty).
                     choice.text = content.unwrap_or_default();
                 } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();
@@ -426,16 +449,30 @@ impl DeltaAggregator {
                     )
                     && choice.text.contains("<tool_call>")
                 {
-                    // glm47 parser dropped an incomplete <tool_call> block because
-                    // max_tokens was hit before the closing </tool_call>. Preserve
-                    // the raw text as content (TRT-LLM parity: TRT-LLM also returns
-                    // partial XML in content on length truncation).
-                    // NOTE: content will contain raw <tool_call> markup.
+                    // No complete tool calls parsed; the entire text is a truncated block.
+                    // Preserve as content (TRT-LLM parity; raw <tool_call> in content).
                     tracing::warn!(
                         parser,
                         "glm47: partial <tool_call> returned as content on length finish                          (TRT-LLM parity; raw markup in content)"
                     );
-                    // choice.text already holds the raw text; leave it as content.
+                }
+
+                // Append any truncated tail discovered before parsing.
+                // This handles a second (or later) <tool_call> truncated after an earlier
+                // complete one — the parser drops it silently, so we recover it here.
+                if let Some(tail) = glm47_truncated_tail {
+                    if !choice.text.contains(&tail) {
+                        tracing::warn!(
+                            parser,
+                            tail_bytes = tail.len(),
+                            "glm47: truncated later <tool_call> appended as content                              (TRT-LLM parity; raw markup in content)"
+                        );
+                        if choice.text.is_empty() {
+                            choice.text = tail;
+                        } else {
+                            choice.text.push_str(&tail);
+                        }
+                    }
                 }
             }
         }
