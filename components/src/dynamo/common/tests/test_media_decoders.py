@@ -148,12 +148,18 @@ def test_install_failure_does_not_raise(clean_env):
     assert len(calls) == 1  # install was attempted
 
 
-def test_no_decode_backend_is_noop(clean_env):
+def test_trtllm_installs_opencv_only(clean_env):
+    # TRT-LLM decodes video_url via cv2 (tensorrt_llm async_load_video); it has
+    # no audio-input path, so only the video carrier is installed.
     clean_env.setenv(media_decoders.ENABLE_ENV, "1")
     calls = _record_pip(clean_env)
     _set_available(clean_env, set())
     media_decoders.maybe_install_media_decoders("trtllm")
-    assert calls == []
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert "opencv-python-headless" in cmd
+    assert "av" not in cmd
+    assert "decord2" not in cmd
 
 
 def test_unknown_backend_is_noop(clean_env):

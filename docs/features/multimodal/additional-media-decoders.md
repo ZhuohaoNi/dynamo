@@ -29,8 +29,9 @@ When enabled, Dynamo installs the on-path decoder package(s) for the backend at 
 | vLLM | video | `opencv-python-headless` | `cv2` |
 | vLLM | audio | `av` | `av` |
 | SGLang | video | `decord2` | `decord` |
+| TensorRT-LLM | video | `opencv-python-headless` | `cv2` |
 
-TensorRT-LLM workers decode no compressed media input, so the switch is a no-op there. Packages that some base images bundle but Dynamo never imports are intentionally left out, so only the decoder actually on the request path is installed.
+Packages that some base images bundle but Dynamo never imports (for example PyNvVideoCodec or torchcodec) are intentionally left out, so only the decoder actually on the request path is installed.
 
 The install is idempotent: if the package already imports (for example in an image that pre-bakes it), startup skips it. Concurrent workers sharing one environment are serialized so only one installs.
 

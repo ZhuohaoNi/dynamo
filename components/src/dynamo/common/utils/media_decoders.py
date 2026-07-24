@@ -13,9 +13,10 @@ Some deployments need to accept a broader range of input video/audio formats
 through a specific Python package whose wheel bundles its own FFmpeg, so the
 support can be added by a plain ``pip install`` -- no image rebuild:
 
-* vLLM video input   -> OpenCV (``cv2``),   package ``opencv-python-headless``
-* vLLM audio input   -> PyAV (``av``),       package ``av``
-* SGLang video input -> decord (``decord``), package ``decord2``
+* vLLM video input    -> OpenCV (``cv2``),   package ``opencv-python-headless``
+* vLLM audio input    -> PyAV (``av``),       package ``av``
+* SGLang video input  -> decord (``decord``), package ``decord2``
+* TRT-LLM video input -> OpenCV (``cv2``),   package ``opencv-python-headless``
 
 When the operator opts in with ``DYN_ENABLE_MEDIA_DECODERS`` (off by default),
 this module installs exactly the on-path package(s) for the running backend at
@@ -101,10 +102,14 @@ _BACKEND_DECODERS: dict[str, tuple[_Decoder, ...]] = {
         _Decoder("av", "av", "audio"),
     ),
     "sglang": (_Decoder("decord2", "decord", "video"),),
+    # TRT-LLM decodes video_url input via tensorrt_llm.inputs -> _load_video_by_cv2
+    # (OpenCV). It has no audio-input decode path today.
+    "trtllm": (_Decoder("opencv-python-headless", "cv2", "video"),),
 }
 
-# Backends that decode no compressed media input -- nothing to install.
-_NO_DECODE_BACKENDS = frozenset({"trtllm"})
+# Backends known to decode no compressed media input -- nothing to install.
+# (None today; kept so an explicit no-op backend can be listed if one appears.)
+_NO_DECODE_BACKENDS: frozenset[str] = frozenset()
 
 # Process-local guard so repeated calls in one interpreter are cheap no-ops.
 _completed: set[str] = set()
