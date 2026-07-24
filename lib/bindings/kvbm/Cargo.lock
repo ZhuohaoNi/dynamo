@@ -1690,6 +1690,7 @@ name = "dynamo-mocker"
 version = "1.4.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "bytes",
  "dashmap",
  "ddsketchy",
