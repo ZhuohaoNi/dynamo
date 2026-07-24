@@ -2838,16 +2838,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-sglang-grpc"
-version = "1.4.0"
-dependencies = [
- "prost 0.13.5",
- "sha2",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
-]
-
-[[package]]
 name = "dynamo-sglang-mocker"
 version = "1.4.0"
 dependencies = [
@@ -2856,7 +2846,6 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-mocker",
- "dynamo-sglang-grpc",
  "dynamo-sglang-sidecar",
  "futures",
  "serde_json",
@@ -2878,13 +2867,15 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-runtime",
- "dynamo-sglang-grpc",
  "futures",
+ "prost 0.13.5",
  "rand 0.9.4",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-util",
  "tonic 0.13.1",
+ "tonic-build 0.13.1",
  "tracing",
  "url",
 ]
