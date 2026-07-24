@@ -64,6 +64,15 @@ CURATED_MODULE_NAMES = {
     "dynamo.mocker",
     "dynamo.nixl_connect",
 }
+SELECTED_DOCSTRING_SUMMARIES = {
+    "dynamo.runtime.dynamo_endpoint": (
+        "Decorator that parses incoming requests into Pydantic models "
+        "on an async generator endpoint."
+    ),
+    "dynamo.planner.connectors.base.PlannerConnector": (
+        "Abstract base class for planner connectors that manage scaling operations."
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +91,33 @@ def all_modules(loader: GriffeLoader) -> list[api_discovery.Module]:
     return [
         api_discovery.discover_module(loader, spec) for spec in api_discovery.MODULES
     ]
+
+
+@pytest.mark.parametrize(
+    ("qualname", "expected"),
+    SELECTED_DOCSTRING_SUMMARIES.items(),
+)
+def test_selected_complex_apis_have_high_value_summaries(
+    all_modules: list[api_discovery.Module],
+    qualname: str,
+    expected: str,
+) -> None:
+    symbols = {
+        symbol.qualname: symbol for module in all_modules for symbol in module.symbols
+    }
+
+    assert symbols[qualname].summary == expected
+
+
+def test_media_url_includes_safe_rewrite_example() -> None:
+    storage = (
+        REPO_ROOT / "components" / "src" / "dynamo" / "common" / "storage.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        '>>> get_media_url(get_fs("memory://media"), "videos/request.mp4", '
+        '"https://cdn.example.com/media")'
+    ) in storage
 
 
 @pytest.fixture(scope="session")

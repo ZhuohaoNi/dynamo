@@ -20,6 +20,15 @@ from dynamo.planner.config.defaults import SubComponentType
 
 # TODO: add ability to scale component to X replicas
 class PlannerConnector(ABC):
+    """Abstract base class for planner connectors that manage scaling operations.
+
+    Separates planner decisions from the deployment control plane. Concrete
+    implementations apply scaling through a Kubernetes
+    ``DynamoGraphDeployment``, virtual state, or a centralized global planner.
+    The ``blocking`` contract controls whether an implementation waits for a
+    requested replica change to complete.
+    """
+
     @abstractmethod
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True

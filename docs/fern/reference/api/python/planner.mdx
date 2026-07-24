@@ -257,7 +257,7 @@ ModelNameNotFoundError()
 </Accordion>
 
 <Accordion id="api-dynamo-planner-connectors-base-plannerconnector" title="PlannerConnector (class)">
-No summary available.
+Abstract base class for planner connectors that manage scaling operations.
 
 ```python
 from dynamo.planner import PlannerConnector
@@ -267,8 +267,8 @@ from dynamo.planner import PlannerConnector
 
 **Public methods**
 
-- `add_component(sub_component_type: SubComponentType, blocking: bool = True) -> None` — Add a component to the planner ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L23))
-- `remove_component(sub_component_type: SubComponentType, blocking: bool = True) -> None` — Remove a component from the planner ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L30))
+- `add_component(sub_component_type: SubComponentType, blocking: bool = True) -> None` — Add a component to the planner ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L32))
+- `remove_component(sub_component_type: SubComponentType, blocking: bool = True) -> None` — Remove a component from the planner ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L39))
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-plannereffects" title="PlannerEffects (class)">
