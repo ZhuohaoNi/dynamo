@@ -113,6 +113,7 @@ python -m dynamo.mocker \
 | `--zmq-replay-ports` | None | Comma-separated ZMQ ROUTER base ports for gap recovery, one per worker |
 | `--bootstrap-ports` | None | Comma-separated rendezvous base ports, one per worker in disaggregated mode |
 | `--kv-transfer-bandwidth` | 64.0 | KV cache transfer bandwidth in GB/s. Set to 0 to disable |
+| `--kv-transfer-bandwidth-model` | `fifo` | Transfer contention model: `fifo` serializes transfers from each prefill worker, while `independent` preserves concurrent full-bandwidth transfers |
 | `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
 | `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
 | `--discovery-backend` | Env-driven (`etcd`) | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` |
@@ -461,7 +462,20 @@ The mocker simulates KV cache transfer time between prefill and decode workers. 
 - **kv_transfer_bandwidth** (default: 64.0 GB/s, inter-node InfiniBand)
 - **Transfer time**: `num_input_tokens * kv_bytes_per_token / bandwidth`
 
-This delay is injected after the scheduler's prefill compute simulation completes, modeling the sequential flow: prefill computation → KV transfer → decode begins. Set `--kv-transfer-bandwidth 0` to disable.
+This delay is injected after the scheduler's prefill compute simulation completes, modeling the
+sequential flow: prefill computation → KV transfer → decode begins. Set
+`--kv-transfer-bandwidth 0` to disable.
+
+The default `--kv-transfer-bandwidth-model fifo` allows one active transfer at the configured full
+bandwidth for each logical prefill worker. Later transfers from that worker wait in first-in,
+first-out order. All data parallel (DP) ranks in one prefill worker share the queue. Queue wait adds
+to destination-reservation-to-activation time and downstream Time To First Token (TTFT). Set
+`--kv-transfer-bandwidth-model independent` to preserve the previous behavior, where overlapping
+transfers each receive the configured full bandwidth.
+
+This model approximates source-side contention only. Different prefill workers transfer
+concurrently, and it does not coordinate contention across processes, pods, or destination network
+interface cards.
 
 ## Integration with Dynamo
 
