@@ -39,6 +39,27 @@ def _processor(
     )
 
 
+async def _prepare_prompt(processor, request, request_id, context, mode):
+    """Compose validate -> prepare_input -> build prompt.
+
+    Exercises the retained media pipeline the way a caller would; previously
+    the (removed) ``VllmMultimodalRequestProcessor.prepare_prompt`` wrapper.
+    """
+    processor.validate_multimodal_request(request)
+    prepared = await processor.prepare_input(request, request_id, context, mode)
+    prompt = prepared.pre_rendered_prompt or processor.build_tokens_prompt(
+        prepared.request,
+        prepared.multi_modal_data,
+        prepared.mm_processor_kwargs,
+    )
+    return SimpleNamespace(
+        prompt=prompt,
+        request=prepared.request,
+        multi_modal_data=prepared.multi_modal_data,
+        mm_processor_kwargs=prepared.mm_processor_kwargs,
+    )
+
+
 @pytest.mark.asyncio
 async def test_extracts_mixed_url_data_url_and_decoded_media():
     processor = _processor()
@@ -119,7 +140,8 @@ async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
     with pytest.raises(ValueError, match="--enable-multimodal"):
-        await processor.prepare_prompt(
+        await _prepare_prompt(
+            processor,
             {
                 "token_ids": [1, 2],
                 "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -130,7 +152,8 @@ async def test_rejects_media_when_multimodal_is_disabled():
         )
 
     with pytest.raises(ValueError, match="--enable-multimodal"):
-        await processor.prepare_prompt(
+        await _prepare_prompt(
+            processor,
             {
                 "token_ids": [1, 2],
                 "extra_args": {"mm_kwargs_shm": {"modality": "image", "items": []}},
@@ -149,7 +172,8 @@ async def test_decode_cannot_hide_disabled_media_with_expanded_tokens():
     )
 
     with pytest.raises(ValueError, match="--enable-multimodal"):
-        await processor.prepare_prompt(
+        await _prepare_prompt(
+            processor,
             {
                 "token_ids": [1, 2],
                 "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -193,7 +217,8 @@ async def test_reads_processor_kwargs_from_router_extra_args():
     audio = object()
     processor.audio_loader.load_audio.return_value = audio
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {
@@ -414,7 +439,8 @@ async def test_aggregated_uses_transferred_prompt_and_falls_back_to_urls():
     transferred = {"type": "multimodal", "prompt_token_ids": [1, 99, 2]}
     processor.try_receive_mm_kwargs = AsyncMock(return_value=transferred)
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -430,7 +456,8 @@ async def test_aggregated_uses_transferred_prompt_and_falls_back_to_urls():
     processor.try_receive_mm_kwargs.return_value = None
     image = Image.new("RGB", (1, 1))
     processor.image_loader.load_image_batch.return_value = [image]
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -489,7 +516,8 @@ async def test_prefill_keeps_raw_media_for_decode_handoff():
     image = Image.new("RGB", (1, 1))
     processor.image_loader.load_image_batch.return_value = [image]
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -514,7 +542,8 @@ async def test_qwen_decode_reconstructs_placeholder_embeddings(monkeypatch):
         lambda grid, shape, request_id: decode_mm_data,
     )
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -540,7 +569,8 @@ async def test_qwen_decode_reconstructs_placeholder_embeddings(monkeypatch):
 async def test_non_qwen_decode_uses_expanded_prompt_tokens():
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
@@ -566,7 +596,8 @@ async def test_decode_reloads_video_media():
     video = object()
     processor.video_loader.load_video_batch.return_value = [video]
 
-    prepared = await processor.prepare_prompt(
+    prepared = await _prepare_prompt(
+        processor,
         {
             "token_ids": [1, 2],
             "multi_modal_data": {
