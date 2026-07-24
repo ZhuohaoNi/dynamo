@@ -426,15 +426,16 @@ impl DeltaAggregator {
                     )
                     && choice.text.contains("<tool_call>")
                 {
-                    // The glm47 parser dropped an incomplete <tool_call> block on
-                    // max_tokens truncation. Do NOT put raw XML into content (that
-                    // violates "no tool tags in content"). Return finish_reason=length
-                    // with empty content/tool_calls; the client sees a truncated turn.
+                    // glm47 parser dropped an incomplete <tool_call> block because
+                    // max_tokens was hit before the closing </tool_call>. Preserve
+                    // the raw text as content (TRT-LLM parity: TRT-LLM also returns
+                    // partial XML in content on length truncation).
+                    // NOTE: content will contain raw <tool_call> markup.
                     tracing::warn!(
                         parser,
-                        "glm47: truncated <tool_call> dropped on length finish                          (finish_reason=length; no markup emitted into content)"
+                        "glm47: partial <tool_call> returned as content on length finish                          (TRT-LLM parity; raw markup in content)"
                     );
-                    choice.text = String::new();
+                    // choice.text already holds the raw text; leave it as content.
                 }
             }
         }

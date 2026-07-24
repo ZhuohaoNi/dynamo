@@ -66,6 +66,7 @@ thread_local! {
     static RENDER_TOOL_ARGUMENTS_MODE: std::cell::Cell<ToolArgumentsMode> =
         const { std::cell::Cell::new(ToolArgumentsMode::JsonString) };
 }
+
 /// RAII guard that sets the thread-local tool-argument mode for the duration of a
 /// synchronous rendering call and resets it to JsonString on drop.
 ///
@@ -129,7 +130,10 @@ pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Valu
             let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) else {
                 continue;
             };
-            if let Some(obj) = tc.get_mut("function").and_then(serde_json::Value::as_object_mut) {
+            if let Some(obj) = tc
+                .get_mut("function")
+                .and_then(serde_json::Value::as_object_mut)
+            {
                 obj.insert("arguments".to_string(), parsed);
             }
         }

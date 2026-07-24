@@ -77,8 +77,8 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{
-    MediaRequestExt, ToolArgumentsMode, ToolArgumentsModeGuard,
-    detect_tool_arguments_mode, mdc_jinja_template_text, prompt_formatter_from_mdc,
+    MediaRequestExt, ToolArgumentsMode, ToolArgumentsModeGuard, detect_tool_arguments_mode,
+    mdc_jinja_template_text, prompt_formatter_from_mdc,
 };
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -2775,7 +2775,10 @@ impl OpenAIPreprocessor {
                     let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
                     for choice in &data.inner.choices {
                         if let Some(content) = &choice.delta.content {
-                            cr.entry(choice.index).or_default().input_text.push_str(content);
+                            cr.entry(choice.index)
+                                .or_default()
+                                .input_text
+                                .push_str(content);
                         }
                     }
                 }
@@ -2825,10 +2828,11 @@ impl OpenAIPreprocessor {
             // When finish_reason=length arrives for a choice that never had a
             // successful tool_call chunk, emit the dropped text as a content
             // delta before the finish chunk (TRT-LLM parity).
-            // NOTE: the recovered content WILL contain raw <tool_call> markup.
-            // This is the documented TRT-LLM parity fallback; callers requiring
-            // strict "no tool tags in content" must filter on finish_reason=length.
-            let mut recovery: Option<Annotated<NvCreateChatCompletionStreamResponse>> = None;
+            // NOTE: recovered content WILL contain raw <tool_call> markup.
+            // Callers requiring strict "no tool tags in content" must filter on
+            // finish_reason=length. A separate recovery chunk is emitted per
+            // affected choice so n > 1 is handled correctly.
+            let mut recoveries: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
             if is_glm47 {
                 if let Some(ref data) = nv_chunk.data {
                     let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
@@ -2856,6 +2860,9 @@ impl OpenAIPreprocessor {
                                     dropped_bytes = dropped.len(),
                                     "glm47 streaming: partial <tool_call> emitted as content                                      on length finish (TRT-LLM parity; raw markup in content)"
                                 );
+                                // Emit one recovery chunk per affected choice so a finish
+                                // chunk with multiple truncated choices (n > 1) is handled
+                                // correctly without overwriting earlier recoveries.
                                 let mut rec = nv_chunk.clone();
                                 if let Some(ref mut rd) = rec.data {
                                     rd.inner.usage = None;
@@ -2867,17 +2874,15 @@ impl OpenAIPreprocessor {
                                         rc.finish_reason = None;
                                     }
                                 }
-                                recovery = Some(rec);
+                                recoveries.push(rec);
                             }
                         }
                     }
                 }
             }
 
-            let mut out = Vec::with_capacity(if recovery.is_some() { 2 } else { 1 });
-            if let Some(r) = recovery {
-                out.push(r);
-            }
+            let mut out = Vec::with_capacity(recoveries.len() + 1);
+            out.extend(recoveries);
             out.push(nv_chunk);
             futures::stream::iter(out)
         })
