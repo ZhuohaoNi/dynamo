@@ -665,14 +665,6 @@ func registerWebhookHandlers(
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
 	}
 
-	// Temporary internal gate for GMS + Snapshot.
-	if gate.Enabled(features.GMSSnapshot) {
-		setupLog.Info(
-			"INTERNAL OVERRIDE: GMS + Snapshot admission rule disabled via env var; do NOT enable in production",
-			"envVar", features.GMSSnapshotEnvVar,
-		)
-	}
-
 	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
 		Config:            operatorCfg,
 		RuntimeConfig:     runtimeConfig,

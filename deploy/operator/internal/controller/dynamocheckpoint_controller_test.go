@@ -520,7 +520,7 @@ func TestCheckpointReconciler_handlePendingFailsUnpreparedGMSCheckpoint(t *testi
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
 	result, err := r.handlePending(context.Background(), ckpt)
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -568,27 +568,6 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 		assert.Empty(t, updated.Status.Message)
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
-	})
-
-	t.Run("GMS snapshot fails when gate is disabled", func(t *testing.T) {
-		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
-		ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
-		r := makeCheckpointReconciler(s, ckpt)
-
-		result, err := r.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
-		})
-		require.NoError(t, err)
-		assert.Equal(t, ctrl.Result{}, result)
-
-		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
-		assert.Contains(t, updated.Status.Message, "GMS + Snapshot is temporarily disabled")
-
-		jobs := &batchv1.JobList{}
-		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
-		assert.Empty(t, jobs.Items)
 	})
 
 	t.Run("Pending checkpoint is paused when checkpoint gate is disabled", func(t *testing.T) {

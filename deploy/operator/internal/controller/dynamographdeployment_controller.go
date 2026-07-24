@@ -198,6 +198,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
+	if err = validateComponentCheckpointFailoverCompatibility(dynamoDeployment); err != nil {
+		reason = "unsupported_checkpoint_failover_configuration"
+		return ctrl.Result{}, err
+	}
+
 	if err = r.migrateCurrentWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
 		logger.Error(err, "Failed to migrate worker hash")
 		reason = "failed_to_migrate_worker_hash"
@@ -305,6 +310,17 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
 
+	state, reason, message = overrideStateForRollingUpdate(dynamoDeployment, state, reason, message)
+
+	return ctrl.Result{}, nil
+}
+
+func overrideStateForRollingUpdate(
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	state nvidiacomv1beta1.DGDState,
+	reason Reason,
+	message Message,
+) (nvidiacomv1beta1.DGDState, Reason, Message) {
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
 		switch dynamoDeployment.Status.RollingUpdate.Phase {
@@ -319,8 +335,19 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 	}
+	return state, reason, message
+}
 
-	return ctrl.Result{}, nil
+// validateComponentCheckpointFailoverCompatibility backs up admission for
+// objects created while the webhook is unavailable.
+func validateComponentCheckpointFailoverCompatibility(dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	for i := range dynamoDeployment.Spec.Components {
+		component := &dynamoDeployment.Spec.Components[i]
+		if err := dynamo.ValidateCheckpointFailoverCompatibility(component.Experimental); err != nil {
+			return fmt.Errorf("component %q: %w", component.ComponentName, err)
+		}
+	}
+	return nil
 }
 
 type Resource interface {
@@ -2007,7 +2034,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			checkpointName := fmt.Sprintf("checkpoint-%s", checkpointID)
 			refConfig := *alphaCheckpointConfig.DeepCopy()
 			refConfig.CheckpointRef = &checkpointName
-			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, &refConfig, r.RuntimeConfig.Gate)
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, &refConfig)
 			if errors.IsNotFound(err) {
 				info = nil
 				err = nil
@@ -2020,7 +2047,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			}
 		} else {
 			// Resolve checkpoint for this component.
-			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, alphaCheckpointConfig, r.RuntimeConfig.Gate)
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, alphaCheckpointConfig)
 		}
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for component", "component", componentName)
@@ -2157,9 +2184,6 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	}
 	var checkpointGMSClaimTemplateName string
 	if gmsSpec != nil && gmsSpec.Enabled {
-		if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gmsSpec, r.RuntimeConfig.Gate); err != nil {
-			return nil, err
-		}
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
 		checkpointGMSGPUCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
 		if err != nil {
@@ -2206,7 +2230,6 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		deletionPolicy,
 		gmsSpec,
 		dynamoDeployment,
-		r.RuntimeConfig.Gate,
 	)
 	if err != nil {
 		return nil, err

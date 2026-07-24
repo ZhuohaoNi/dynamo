@@ -19,6 +19,58 @@ func TestComponentsByNameNil(t *testing.T) {
 	}
 }
 
+func TestValidateCheckpointFailoverCompatibility(t *testing.T) {
+	tests := []struct {
+		name         string
+		experimental *v1beta1.ExperimentalSpec
+		wantErr      bool
+	}{
+		{name: "no experimental features"},
+		{
+			name: "checkpoint only",
+			experimental: &v1beta1.ExperimentalSpec{
+				Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+			},
+		},
+		{
+			name: "failover only",
+			experimental: &v1beta1.ExperimentalSpec{
+				Failover: &v1beta1.FailoverSpec{},
+			},
+		},
+		{
+			name: "disabled checkpoint with failover",
+			experimental: &v1beta1.ExperimentalSpec{
+				Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false},
+				Failover:   &v1beta1.FailoverSpec{},
+			},
+		},
+		{
+			name: "enabled checkpoint with failover",
+			experimental: &v1beta1.ExperimentalSpec{
+				Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+				Failover:   &v1beta1.FailoverSpec{},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCheckpointFailoverCompatibility(tt.experimental)
+			if tt.wantErr {
+				if err == nil || err.Error() != checkpointFailoverUnsupportedMessage {
+					t.Fatalf("ValidateCheckpointFailoverCompatibility() error = %v, want %q", err, checkpointFailoverUnsupportedMessage)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateCheckpointFailoverCompatibility() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestGetDCDComponentNamePrefersSpecOverLegacyMetadata(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{

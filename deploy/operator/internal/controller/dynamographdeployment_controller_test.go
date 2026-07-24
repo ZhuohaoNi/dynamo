@@ -45,6 +45,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,6 +55,7 @@ import (
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -76,6 +78,53 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		}
 	}
 	return s
+}
+
+func TestDynamoGraphDeploymentReconcilerRejectsCheckpointWithActivePassiveFailover(t *testing.T) {
+	t.Log("Create a DGD that bypassed admission with checkpoint and failover enabled")
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", Generation: 1},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					Failover:   &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+				},
+			}},
+		},
+	}
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(dgd).
+		WithStatusSubresource(dgd).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{Client: fakeKubeClient}
+
+	t.Log("Reconcile rejects the incompatible configuration")
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	require.ErrorContains(t, err, `component "worker": checkpoint/snapshot is not supported with active/passive failover`)
+
+	t.Log("Status records the error and no child resource is created")
+	updated := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, fakeKubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), updated))
+	assert.Equal(t, v1beta1.DGDStateFailed, updated.Status.State)
+	ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, "unsupported_checkpoint_failover_configuration", ready.Reason)
+	assert.Contains(t, ready.Message, "checkpoint/snapshot is not supported with active/passive failover")
+
+	checkpoints := &v1alpha1.DynamoCheckpointList{}
+	require.NoError(t, fakeKubeClient.List(context.Background(), checkpoints))
+	assert.Empty(t, checkpoints.Items)
+	components := &v1beta1.DynamoComponentDeploymentList{}
+	require.NoError(t, fakeKubeClient.List(context.Background(), components))
+	assert.Empty(t, components.Items)
 }
 
 func TestDynamoGraphDeploymentReconciler_preserveExistingDCDBackendFramework(t *testing.T) {
@@ -762,7 +811,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Does
 		Client:        cl,
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		Recorder:      record.NewFakeRecorder(100),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true, GMSSnapshot: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
 	require.NoError(t, r.reconcileGMSResourceClaimTemplates(ctx, dgd))
@@ -950,7 +999,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotAdoptLegacyIde
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -1007,7 +1056,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClie
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 
@@ -1188,7 +1237,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t
 		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config: &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1733,7 +1782,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_overlaysServiceGMS
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{Checkpoint: true, GMSSnapshot: true},
+			Gate: features.Gates{Checkpoint: true},
 		},
 	}
 

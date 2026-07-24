@@ -88,6 +88,9 @@ When used with GMS, weights can be restored in parallel with the CRIU/CUDA check
 | **TensorRT-LLM** | ✅ | 🚧 | 🚧 |
 
 **Notes:**
-- Dynamo Snapshot + GMS integration is currently disabled by default and requires both the operator gate `DYN_OPERATOR_ALLOW_GMS_SNAPSHOT=1` and CUDA Driver r610 or later.
+- Dynamo Snapshot + GMS requires NVIDIA driver r610 or later. Enable the
+  general operator checkpoint configuration; no separate GMS opt-in gate is
+  required.
+- Checkpoint/Snapshot is incompatible with active/passive failover.
 - TensorRT-LLM Snapshot is supported only for the experimental single-GPU aggregated text worker path; broader TensorRT-LLM coverage remains work in progress. See [Snapshotting GPU Workers](./snapshot.md) for setup steps, prerequisites, and limitations.
 - Multi-GPU, Single Node is available in a highly experimental/slightly limited path that uses legacy IPC only for P2P.

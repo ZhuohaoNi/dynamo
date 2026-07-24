@@ -83,8 +83,9 @@ The following diagram illustrates same-node process-level recovery:
   as a complete failover workflow.
 - Do not use it for hardware failure, GPU loss, node loss, cross-node recovery,
   in-flight request recovery, or KV-cache recovery.
-- Do not combine it with Snapshot restore. Snapshot plus GMS is not yet
-  available.
+- Do not combine active/passive failover with checkpoint/Snapshot. GMS without
+  failover supports Snapshot on NVIDIA driver r610 or later and requires no
+  separate GMS opt-in gate.
 
 ## GPU Memory Service
 
@@ -113,9 +114,11 @@ active/passive failover; use the `failover` field for the shadow engine flow.
 - It is not a hardware fault tolerance mechanism for GPU, node, or rack loss.
 - It does not diagnose or fix the backend failure.
 - It does not preserve in-flight requests, network sockets, or KV cache state.
-- It does not make Snapshot restore supported for GPU memory workloads.
-- Snapshot plus GMS is temporarily blocked by admission because of known GPU
-  driver restore issues.
+- It cannot be combined with checkpoint/Snapshot. Admission and reconciliation
+  reject components that enable both.
+- GMS without failover can use Snapshot on NVIDIA driver r610 or later. Enable
+  the general operator checkpoint configuration; no separate GMS opt-in gate
+  is required.
 - It is not covered by the normal v1beta1 compatibility guarantees while it
   lives under `experimental`.
 

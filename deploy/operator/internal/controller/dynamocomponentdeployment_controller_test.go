@@ -38,6 +38,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -45,6 +46,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -67,6 +69,52 @@ func init() {
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
 		panic(err)
 	}
+}
+
+func TestDynamoComponentDeploymentReconcilerRejectsCheckpointWithActivePassiveFailover(t *testing.T) {
+	t.Log("Create a DCD that bypassed admission with checkpoint and failover enabled")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-worker", Namespace: "default", Generation: 1},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					Failover:   &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+				},
+			},
+		},
+	}
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(dcd).
+		WithStatusSubresource(dcd).
+		Build()
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:   fakeKubeClient,
+		Recorder: recorder,
+	}
+
+	t.Log("Reconcile rejects the incompatible configuration")
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dcd),
+	})
+	require.ErrorContains(t, err, "unsupported component configuration: checkpoint/snapshot is not supported with active/passive failover")
+
+	t.Log("Status records the error and no workload child is created")
+	updated := &v1beta1.DynamoComponentDeployment{}
+	require.NoError(t, fakeKubeClient.Get(context.Background(), client.ObjectKeyFromObject(dcd), updated))
+	available := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.DynamoComponentDeploymentConditionTypeAvailable)
+	require.NotNil(t, available)
+	assert.Equal(t, metav1.ConditionFalse, available.Status)
+	assert.Contains(t, available.Message, "checkpoint/snapshot is not supported with active/passive failover")
+	assert.Contains(t, <-recorder.Events, "ReconcileError")
+
+	deployments := &appsv1.DeploymentList{}
+	require.NoError(t, fakeKubeClient.List(context.Background(), deployments))
+	assert.Empty(t, deployments.Items)
 }
 
 func normalizeLeaderWorkerSetForCompare(lws *leaderworkersetv1.LeaderWorkerSet) *leaderworkersetv1.LeaderWorkerSet {
@@ -1823,7 +1871,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
 		podTemplateSpec, err := r.generatePodTemplateSpec(
 			context.Background(),
 			generateResourceOption{dynamoComponentDeployment: dcd},
@@ -1944,7 +1992,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
 		podTemplateSpec, err := r.generatePodTemplateSpec(
 			context.Background(),
 			generateResourceOption{dynamoComponentDeployment: dcd},

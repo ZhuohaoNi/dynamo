@@ -69,6 +69,50 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 checkpoint with active-passive failover is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+					Failover:         &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+					Checkpoint:       &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: consts.MainContainerName,
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+							corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+						}},
+					}},
+				}}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint/snapshot is not supported with active/passive failover"},
+		},
+		{
+			name: "v1alpha1 checkpoint with active-passive failover is rejected after conversion",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true},
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint/snapshot is not supported with active/passive failover"},
+		},
+		{
+			name: "v1alpha1 disabled failover with checkpoint is accepted",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint:    &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true},
+				Failover:      &nvidiacomv1alpha1.FailoverSpec{Enabled: false},
+			}),
+		},
+		{
 			name:          "checkpoint configuration requires operator feature gate",
 			checkpointOff: true,
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
@@ -436,6 +480,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
 				},
 				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
 					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
 						Model:            "model",
 						BackendFramework: dcdAdmissionVLLMBackend,
@@ -536,11 +581,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.experimental.checkpoint.job.gmsClientContainers: Forbidden: is only supported with gpuMemoryService.mode=IntraPod",
-				"spec.experimental.checkpoint: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
 			},
 		},
 		{
-			name: "checkpoint GMS clients accept intra-pod GMS",
+			name: "GMS with enabled checkpoint is accepted without a GMS gate",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Resources:     workerGPU,

@@ -161,6 +161,10 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, nil
 	}
 
+	if err = dynamo.ValidateCheckpointFailoverCompatibility(dynamoComponentDeployment.Spec.Experimental); err != nil {
+		return ctrl.Result{}, fmt.Errorf("unsupported component configuration: %w", err)
+	}
+
 	if len(dynamoComponentDeployment.Status.Conditions) == 0 {
 		logs.Info("Starting to reconcile DynamoComponentDeployment")
 		logs.Info("Initializing DynamoComponentDeployment status")
@@ -958,7 +962,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	// Resolve checkpoint for this component
 	var checkpointInfo *checkpoint.CheckpointInfo
 	if checkpointConfig := dynamo.GetCheckpoint(component); r.RuntimeConfig.Gate.Enabled(features.Checkpoint) && checkpointConfig != nil {
-		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dcd.Namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig), r.RuntimeConfig.Gate)
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dcd.Namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig))
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
