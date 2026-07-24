@@ -2729,11 +2729,18 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
-        // Buffer raw input text so truncated tool_call blocks can be recovered as
-        // content if the jail drops them on finish_reason=length (Fix: GLM-5.2
-        // glm47_parser allow_eof_recovery=false silently drops incomplete blocks).
-        let input_text_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-        let input_text_buf_in = Arc::clone(&input_text_buf);
+        // Per-choice recovery state for truncated tool_call blocks.
+        // Tracks input text, emitted content bytes, and whether a tool_call was
+        // successfully parsed — all keyed by choice.index to handle n > 1 correctly.
+        #[derive(Default)]
+        struct ChoiceRecovery {
+            input_text: String,
+            emitted_content_len: usize,
+            saw_tool_call: bool,
+        }
+        let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let choice_recovery_in = Arc::clone(&choice_recovery);
 
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
@@ -2742,14 +2749,12 @@ impl OpenAIPreprocessor {
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
             }
-            // Accumulate input content for truncation recovery below.
+            // Accumulate input content per choice for truncation recovery below.
             if let Some(data) = &a.data {
+                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
                 for choice in &data.inner.choices {
                     if let Some(content) = &choice.delta.content {
-                        input_text_buf_in
-                            .lock()
-                            .expect("input text buffer poisoned")
-                            .push_str(content);
+                        cr.entry(choice.index).or_default().input_text.push_str(content);
                     }
                 }
             }
@@ -2761,11 +2766,6 @@ impl OpenAIPreprocessor {
                 error: a.error.map(|e| e.to_string()),
             }
         });
-
-        // Track how many bytes the jail has emitted as content so we can compute
-        // what was silently dropped on a length-truncation finish.
-        let output_content_len: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-        let output_content_len_track = Arc::clone(&output_content_len);
 
         // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
         jail_apply(
@@ -2799,64 +2799,61 @@ impl OpenAIPreprocessor {
                 error: a.error.map(DynamoError::msg),
             };
 
-            // Track output content length and detect truncated tool_call drops.
-            // When finish_reason=length arrives with no tool_calls in the output
-            // but the input contained <tool_call>, the jail dropped the block.
-            // Emit the dropped text as content before the finish chunk so the
-            // client sees it rather than receiving a silent empty assistant turn.
-            let mut extra: Option<Annotated<NvCreateChatCompletionStreamResponse>> = None;
+            // Per-choice recovery: update state then check for truncated drops.
+            // A drop is confirmed only when finish_reason=length arrives for a
+            // choice that never had a successful tool_call chunk emitted.
+            let mut extras: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
             if let Some(ref data) = nv_chunk.data {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
                 for choice in &data.inner.choices {
-                    // Track emitted content bytes.
+                    let state = cr.entry(choice.index).or_default();
+                    // Track emitted content.
                     if let Some(content) = &choice.delta.content {
-                        *output_content_len_track
-                            .lock()
-                            .expect("output content len poisoned") += content.len();
+                        state.emitted_content_len += content.len();
                     }
-                    // On length finish with no tool_calls, recover dropped text.
+                    // Mark if a non-empty tool_call was successfully emitted.
+                    if choice.delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
+                        state.saw_tool_call = true;
+                    }
+                    // On length finish: recover only if no tool_call was seen for
+                    // this choice and the unread input tail contains <tool_call>.
                     if matches!(
                         choice.finish_reason,
                         Some(dynamo_protocols::types::FinishReason::Length)
-                    ) && choice.delta.tool_calls.is_none()
+                    ) && !state.saw_tool_call
                     {
-                        let input_text = input_text_buf
-                            .lock()
-                            .expect("input text buffer poisoned")
-                            .clone();
-                        let emitted = *output_content_len_track
-                            .lock()
-                            .expect("output content len poisoned");
-                        let dropped = if emitted < input_text.len() {
-                            &input_text[emitted..]
+                        let dropped = if state.emitted_content_len < state.input_text.len() {
+                            state.input_text[state.emitted_content_len..].to_string()
                         } else {
-                            ""
+                            String::new()
                         };
                         if !dropped.is_empty() && dropped.contains("<tool_call>") {
                             tracing::debug!(
+                                choice_index = choice.index,
                                 dropped_len = dropped.len(),
                                 "glm47 streaming: preserving truncated tool_call as content"
                             );
-                            // Synthesize a content-only chunk carrying the dropped text.
+                            // Synthesize a content chunk scoped to this choice only.
                             let mut recovery = nv_chunk.clone();
                             if let Some(ref mut rd) = recovery.data {
                                 rd.inner.usage = None;
                                 rd.llm_metrics = None;
+                                // Keep only the triggering choice in the recovery chunk.
+                                rd.inner.choices.retain(|c| c.index == choice.index);
                                 for rc in &mut rd.inner.choices {
-                                    rc.delta.content = Some(dropped.to_string());
+                                    rc.delta.content = Some(dropped.clone());
                                     rc.delta.tool_calls = None;
                                     rc.finish_reason = None;
                                 }
                             }
-                            extra = Some(recovery);
+                            extras.push(recovery);
                         }
                     }
                 }
             }
 
-            let mut out = Vec::with_capacity(2);
-            if let Some(e) = extra {
-                out.push(e);
-            }
+            let mut out = Vec::with_capacity(extras.len() + 1);
+            out.extend(extras);
             out.push(nv_chunk);
             futures::stream::iter(out)
         })

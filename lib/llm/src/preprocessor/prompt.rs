@@ -35,10 +35,17 @@ pub trait MediaRequestExt {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder>;
 }
 
+/// Whether a model's Jinja chat template expects tool_calls[*].function.arguments
+/// as a parsed object (dict) rather than a JSON-object string.
+/// GLM-5.2 does (`{% for k, v in _args.items() %}`); other models may not.
+pub(crate) fn template_wants_arguments_as_dict(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("glm")
+}
+
 /// Parse `tool_calls[*].function.arguments` from JSON string to object in a
 /// serialized messages array before handing it to MiniJinja.
-/// GLM-5.2's Jinja template iterates arguments with `{% for k, v in _args.items() %}`
-/// which requires a dict; the OpenAI wire schema stores arguments as a JSON-object string.
+/// Only applied for models whose template requires a dict (see `template_wants_arguments_as_dict`).
 pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Value) {
     if let Some(msgs) = messages_json.as_array_mut() {
         for msg in msgs.iter_mut() {
@@ -69,7 +76,9 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn messages(&self) -> Value {
         let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
-        normalize_tool_call_arguments(&mut messages_json);
+        if template_wants_arguments_as_dict(&self.inner.model) {
+            normalize_tool_call_arguments(&mut messages_json);
+        }
         Value::from_serialize(&messages_json)
     }
 

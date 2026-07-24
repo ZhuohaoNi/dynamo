@@ -464,7 +464,9 @@ impl OAIChatLikeRequest for UnifiedRequest {
 
     fn messages(&self) -> minijinja::value::Value {
         let mut messages_json = serde_json::to_value(&self.inner.inner.messages).unwrap();
-        crate::preprocessor::prompt::normalize_tool_call_arguments(&mut messages_json);
+        if crate::preprocessor::prompt::template_wants_arguments_as_dict(&self.inner.inner.model) {
+            crate::preprocessor::prompt::normalize_tool_call_arguments(&mut messages_json);
+        }
         minijinja::value::Value::from_serialize(&messages_json)
     }
 
