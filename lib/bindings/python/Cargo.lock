@@ -2299,6 +2299,7 @@ version = "1.4.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
+ "blake3",
  "bytes",
  "dashmap",
  "ddsketchy",
