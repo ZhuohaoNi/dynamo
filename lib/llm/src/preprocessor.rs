@@ -76,7 +76,10 @@ use crate::protocols::{
 };
 use crate::tokenizers::traits::Tokenizer;
 
-use crate::preprocessor::prompt::{MediaRequestExt, ToolArgumentsMode, detect_tool_arguments_mode, mdc_jinja_template_text, normalize_tool_call_arguments, prompt_formatter_from_mdc};
+use crate::preprocessor::prompt::{
+    MediaRequestExt, ToolArgumentsMode, ToolArgumentsModeGuard,
+    detect_tool_arguments_mode, mdc_jinja_template_text, prompt_formatter_from_mdc,
+};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
@@ -867,6 +870,10 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
+            // Hold the RAII guard for the synchronous apply_template call only.
+            // No .await occurs between guard creation and drop, so thread-local
+            // access is safe. The guard resets to JsonString on drop.
+            let _mode_guard = ToolArgumentsModeGuard::new(self.tool_arguments_mode);
             self.apply_template(request)
                 .with_context(|| "Failed to apply prompt template")?
         };
@@ -2786,7 +2793,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .flat_map(move |a| {
+        .map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -2810,58 +2817,41 @@ impl OpenAIPreprocessor {
                 error: a.error.map(DynamoError::msg),
             };
 
-            // Per-choice recovery: update state then check for truncated drops.
-            // A drop is confirmed only when finish_reason=length arrives for a
-            // choice that never had a successful tool_call chunk emitted.
-            let mut extras: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+            // Track per-choice state for truncated tool_call diagnostics.
             if let Some(ref data) = nv_chunk.data {
                 let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
                 for choice in &data.inner.choices {
                     let state = cr.entry(choice.index).or_default();
-                    // Track emitted content.
                     if let Some(content) = &choice.delta.content {
                         state.emitted_content_len += content.len();
                     }
-                    // Mark if a non-empty tool_call was successfully emitted.
                     if choice.delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
                         state.saw_tool_call = true;
                     }
-                    // On length finish: recover only for glm47 parser if no tool_call
-                    // was seen for this choice and the unread input tail has <tool_call>.
-                    // The recovery is glm47-specific because <tool_call> is GLM's markup.
                     if matches!(
                         choice.finish_reason,
                         Some(dynamo_protocols::types::FinishReason::Length)
                     ) && !state.saw_tool_call
                         && tool_call_parser.as_deref() == Some("glm47")
                     {
-                        // Safe byte-boundary slicing: emitted_content_len counts output bytes
-                        // which should align with input for prose-passthrough parsers, but
-                        // use get() to avoid panicking on mismatched offsets or non-ASCII.
                         let dropped = state
                             .input_text
                             .get(state.emitted_content_len..)
-                            .unwrap_or("")
-                            .to_string();
+                            .unwrap_or("");
                         if !dropped.is_empty() && dropped.contains("<tool_call>") {
-                            // The glm47 parser dropped an incomplete <tool_call> block
-                            // on max_tokens truncation. We do NOT emit the raw markup as
-                            // content (that would violate "no tool tags in content").
-                            // finish_reason=length is sufficient signal to the client.
+                            // Truncated tool_call: finish_reason=length with empty turn.
+                            // Raw XML is NOT emitted into content (strict schema invariant).
                             tracing::warn!(
                                 choice_index = choice.index,
                                 dropped_bytes = dropped.len(),
-                                "glm47 streaming: truncated <tool_call> dropped on length finish                                  (finish_reason=length preserved; no markup emitted into content)"
+                                "glm47 streaming: truncated <tool_call> on length finish                                  (empty turn returned; no markup in content)"
                             );
                         }
                     }
                 }
             }
 
-            let mut out = Vec::with_capacity(extras.len() + 1);
-            out.extend(extras);
-            out.push(nv_chunk);
-            futures::stream::iter(out)
+            nv_chunk
         })
     }
 
@@ -3438,10 +3428,6 @@ impl
                 .ok()
                 .is_some_and(|flag| *flag),
         };
-
-        // Set thread-local argument mode so messages() can normalize
-        // tool_calls[*].function.arguments without a field on the request type.
-        crate::preprocessor::prompt::set_tool_arguments_mode_for_render(self.tool_arguments_mode);
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning) = self

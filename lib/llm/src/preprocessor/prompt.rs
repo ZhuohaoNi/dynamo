@@ -67,14 +67,29 @@ thread_local! {
         const { std::cell::Cell::new(ToolArgumentsMode::JsonString) };
 }
 
-/// Set the thread-local mode before calling formatter.render(); resets automatically
-/// to JsonString after the render call (caller should reset or use RAII if needed).
-pub(crate) fn set_tool_arguments_mode_for_render(mode: ToolArgumentsMode) {
-    RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.set(mode));
+/// RAII guard that sets the thread-local tool-argument mode for the duration of a
+/// synchronous rendering call and resets it to JsonString on drop.
+///
+/// SAFETY: Only use this guard in a *synchronous* (non-`async`) scope with no
+/// `.await` between guard creation and drop. Thread-locals are unsafe across
+/// async executor boundaries — the task may resume on a different OS thread.
+/// `apply_template` is sync; the caller must ensure no `.await` intervenes.
+pub(crate) struct ToolArgumentsModeGuard(());
+
+impl ToolArgumentsModeGuard {
+    pub(crate) fn new(mode: ToolArgumentsMode) -> Self {
+        RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.set(mode));
+        Self(())
+    }
 }
 
-/// Read the current thread-local argument mode (called from messages()).
-pub(crate) fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
+impl Drop for ToolArgumentsModeGuard {
+    fn drop(&mut self) {
+        RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.set(ToolArgumentsMode::JsonString));
+    }
+}
+
+fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
     RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.get())
 }
 
