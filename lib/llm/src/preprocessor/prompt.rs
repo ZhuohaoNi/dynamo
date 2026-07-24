@@ -74,22 +74,25 @@ thread_local! {
 /// `.await` between guard creation and drop. Thread-locals are unsafe across
 /// async executor boundaries — the task may resume on a different OS thread.
 /// `apply_template` is sync; the caller must ensure no `.await` intervenes.
-pub(crate) struct ToolArgumentsModeGuard(());
+/// Saves the previous thread-local mode and restores it on drop.
+pub(crate) struct ToolArgumentsModeGuard {
+    previous: ToolArgumentsMode,
+}
 
 impl ToolArgumentsModeGuard {
     pub(crate) fn new(mode: ToolArgumentsMode) -> Self {
-        RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.set(mode));
-        Self(())
+        let previous = RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.replace(mode));
+        Self { previous }
     }
 }
 
 impl Drop for ToolArgumentsModeGuard {
     fn drop(&mut self) {
-        RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.set(ToolArgumentsMode::JsonString));
+        RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.set(self.previous));
     }
 }
 
-fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
+pub(crate) fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
     RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.get())
 }
 
