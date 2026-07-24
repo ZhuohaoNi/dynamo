@@ -76,7 +76,7 @@ use crate::protocols::{
 };
 use crate::tokenizers::traits::Tokenizer;
 
-use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
+use crate::preprocessor::prompt:{MediaRequestExt, ToolArgumentsMode, detect_tool_arguments_mode, mdc_jinja_template_text, normalize_tool_call_arguments, prompt_formatter_from_mdc};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
@@ -278,6 +278,10 @@ pub struct OpenAIPreprocessor {
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
+    /// Whether the loaded chat template requires tool_calls[*].function.arguments
+    /// as a parsed serde_json object (vs. the OpenAI wire-schema JSON string).
+    /// Derived once from the Jinja template source at construction.
+    tool_arguments_mode: ToolArgumentsMode,
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
@@ -610,6 +614,12 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        // Detect argument mode from the Jinja template source once at construction.
+        // Falls back to JsonString (no-op normalization) for models without a .jinja file.
+        let tool_arguments_mode = mdc_jinja_template_text(&mdc)
+            .as_deref()
+            .map(detect_tool_arguments_mode)
+            .unwrap_or_default();
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -794,6 +804,7 @@ impl OpenAIPreprocessor {
             runtime_config,
             kv_cache_block_size,
             tool_call_parser,
+            tool_arguments_mode,
             media_loader,
             context_length,
             #[cfg(feature = "mm-routing")]
@@ -2833,10 +2844,15 @@ impl OpenAIPreprocessor {
                             .unwrap_or("")
                             .to_string();
                         if !dropped.is_empty() && dropped.contains("<tool_call>") {
-                            tracing::debug!(
+                            // Deliberate TRT-LLM parity: partial <tool_call> XML emitted
+                            // as content when max_tokens truncates mid-stream. This is an
+                            // intentional fallback; content WILL contain raw tool-call
+                            // markup. Clients requiring strict "no tool tags in content"
+                            // invariant must filter on finish_reason=length.
+                            tracing::warn!(
                                 choice_index = choice.index,
-                                dropped_len = dropped.len(),
-                                "glm47 streaming: preserving truncated tool_call as content"
+                                dropped_bytes = dropped.len(),
+                                "glm47 streaming: partial <tool_call> emitted as content                                  (length finish, TRT-LLM parity fallback — raw markup in content)"
                             );
                             // Synthesize a content chunk scoped to this choice only.
                             let mut recovery = nv_chunk.clone();
@@ -3437,6 +3453,10 @@ impl
                 .ok()
                 .is_some_and(|flag| *flag),
         };
+
+        // Stamp the template-derived argument mode onto the request so messages()
+        // can normalize tool_calls[*].function.arguments without accessing the formatter.
+        request.tool_arguments_mode = self.tool_arguments_mode;
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning) = self

@@ -427,11 +427,13 @@ impl DeltaAggregator {
                     && choice.text.contains("<tool_call>")
                 {
                     // GLM-4.7/5.2 glm47 parser dropped a truncated <tool_call> block
-                    // (no closing </tool_call>, hit max_tokens). Preserve the raw text
-                    // as content so the client receives it rather than an empty turn.
-                    tracing::debug!(
+                    // (no closing </tool_call>, hit max_tokens). Emit raw text as content
+                    // for TRT-LLM parity — prevents empty turn / trajectory divergence.
+                    // NOTE: content will contain raw <tool_call> markup.
+                    // Clients requiring strict "no tool tags in content" must filter this.
+                    tracing::warn!(
                         parser,
-                        "glm47: preserving truncated tool_call as content on length finish"
+                        "glm47: partial <tool_call> emitted as content                          (length finish, TRT-LLM parity fallback — raw markup in content)"
                     );
                     // choice.text already holds the raw text; leave it as-is.
                 }

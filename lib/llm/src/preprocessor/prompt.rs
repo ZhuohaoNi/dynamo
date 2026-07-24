@@ -35,19 +35,46 @@ pub trait MediaRequestExt {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder>;
 }
 
-/// Whether a model's Jinja chat template expects tool_calls[*].function.arguments
-/// as a parsed object (dict) rather than a JSON-object string.
-/// GLM-5.2 uses `{% for k, v in _args.items() %}` in chat_template.jinja.
-/// Gated on "glm-5" / "glm5" to avoid altering rendering for other GLM variants.
-pub(crate) fn template_wants_arguments_as_dict(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    m.contains("glm-5") || m.contains("glm5")
+/// How a chat template expects tool_calls[*].function.arguments to be passed.
+/// Inferred once from the Jinja source at formatter construction; never from the
+/// served model name, which is arbitrary and not reliable for template detection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ToolArgumentsMode {
+    /// Template receives arguments as a JSON-object string (OpenAI wire default).
+    #[default]
+    JsonString,
+    /// Template calls `.items()` on arguments (e.g. GLM-5.2's
+    /// `{% for k, v in _args.items() %}`), so arguments must be a parsed object.
+    ParsedObject,
+}
+
+/// Inspect a Jinja template source and return the required argument mode.
+/// Scans for common patterns that call `.items()` on tool-call arguments.
+pub fn detect_tool_arguments_mode(template: &str) -> ToolArgumentsMode {
+    // GLM-5.2: `{% set _args = tc.arguments %}{% for k, v in _args.items() %}`
+    if template.contains("_args.items()") || template.contains("arguments.items()") {
+        ToolArgumentsMode::ParsedObject
+    } else {
+        ToolArgumentsMode::JsonString
+    }
+}
+
+/// Read the Jinja template text from a ModelDeploymentCard, if available.
+/// Returns None for models whose template is embedded in tokenizer_config.json
+/// (those use the renderer's internal template logic, not a standalone Jinja file).
+pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
+    match mdc.chat_template_file.as_ref()? {
+        PromptFormatterArtifact::HfChatTemplateJinja { file, .. } => {
+            let path = file.path()?;
+            std::fs::read_to_string(path).ok()
+        }
+        _ => None,
+    }
 }
 
 /// Parse `tool_calls[*].function.arguments` from JSON string to object in a
 /// serialized messages array before handing it to MiniJinja.
-/// Only applied for models whose template iterates arguments as a dict
-/// (see `template_wants_arguments_as_dict`).
+/// Only applied when `ToolArgumentsMode::ParsedObject` is detected from the template.
 pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Value) {
     let Some(messages) = messages_json.as_array_mut() else {
         return;
@@ -80,7 +107,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn messages(&self) -> Value {
         let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
-        if template_wants_arguments_as_dict(&self.inner.model) {
+        // Normalize tool_calls[*].function.arguments from JSON string to object when
+        // the loaded Jinja template requires dict args (e.g. GLM-5.2 .items() call).
+        // The mode is written by OpenAIPreprocessor::preprocess before template render.
+        if self.tool_arguments_mode == ToolArgumentsMode::ParsedObject {
             normalize_tool_call_arguments(&mut messages_json);
         }
         Value::from_serialize(&messages_json)
