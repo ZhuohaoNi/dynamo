@@ -119,7 +119,7 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
             .map(str::to_owned)
     }
 
-    // 1. Standalone template file (chat_template.jinja or chat_template.json).
+    // 1. Standalone template file.
     if let Some(artifact) = mdc.chat_template_file.as_ref() {
         match artifact {
             PromptFormatterArtifact::HfChatTemplateJinja { file, .. } => {
@@ -129,8 +129,11 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
                     }
                 }
             }
-            PromptFormatterArtifact::HfTokenizerConfigJson(f) => {
-                if let Some(s) = read_embedded(f) {
+            // chat_template.json — same JSON layout as tokenizer_config.json
+            // (a "chat_template" key whose value is the Jinja string).
+            PromptFormatterArtifact::HfChatTemplateJson { file, .. }
+            | PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
+                if let Some(s) = read_embedded(file) {
                     return Some(s);
                 }
             }
@@ -228,6 +231,66 @@ mod tests {
         let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
         assert!(args.is_object());
         assert_eq!(args["key"], "val");
+    }
+
+    /// Test that mdc_jinja_template_text reads the embedded chat_template
+    /// from mdc.prompt_formatter (the HfTokenizerConfigJson / normal HF layout).
+    #[test]
+    fn mdc_template_text_reads_prompt_formatter_embedded() {
+        use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+
+        // Write a minimal tokenizer_config.json with a chat_template that uses .items()
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tc_path = dir.path().join("tokenizer_config.json");
+        std::fs::write(
+            &tc_path,
+            r#"{"tokenizer_class":"PreTrainedTokenizer","chat_template":"{% for k, v in _args.items() %}"}"#,
+        )
+        .expect("write");
+
+        let checked = crate::common::checked_file::CheckedFile::from_disk(&tc_path)
+            .expect("CheckedFile");
+
+        // Build a minimal MDC with only prompt_formatter set.
+        let mut mdc = ModelDeploymentCard::default();
+        mdc.prompt_formatter = Some(PromptFormatterArtifact::HfTokenizerConfigJson(checked));
+
+        let text = mdc_jinja_template_text(&mdc).expect("should find template");
+        assert!(
+            text.contains("_args.items()"),
+            "extracted template should contain .items() pattern"
+        );
+        assert_eq!(
+            detect_tool_arguments_mode(&text),
+            ToolArgumentsMode::ParsedObject
+        );
+    }
+
+    /// Test that chat_template.json (HfChatTemplateJson) is also detected.
+    #[test]
+    fn mdc_template_text_reads_chat_template_json() {
+        use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chat_template.json");
+        std::fs::write(
+            &path,
+            r#"{"chat_template":"{% for k, v in arguments.items() %}"}"#,
+        )
+        .expect("write");
+
+        let checked = crate::common::checked_file::CheckedFile::from_disk(&path)
+            .expect("CheckedFile");
+
+        let mut mdc = ModelDeploymentCard::default();
+        mdc.chat_template_file =
+            Some(PromptFormatterArtifact::HfChatTemplateJson { file: checked, is_custom: false });
+
+        let text = mdc_jinja_template_text(&mdc).expect("template");
+        assert_eq!(
+            detect_tool_arguments_mode(&text),
+            ToolArgumentsMode::ParsedObject
+        );
     }
 }
 
