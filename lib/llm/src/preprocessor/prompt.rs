@@ -66,7 +66,6 @@ thread_local! {
     static RENDER_TOOL_ARGUMENTS_MODE: std::cell::Cell<ToolArgumentsMode> =
         const { std::cell::Cell::new(ToolArgumentsMode::JsonString) };
 }
-
 /// RAII guard that sets the thread-local tool-argument mode for the duration of a
 /// synchronous rendering call and resets it to JsonString on drop.
 ///

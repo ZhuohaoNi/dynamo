@@ -2747,15 +2747,17 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
-        // Per-choice recovery state for truncated tool_call blocks.
-        // Tracks input text, emitted content bytes, and whether a tool_call was
-        // successfully parsed — all keyed by choice.index to handle n > 1 correctly.
+        // Per-choice recovery state — allocated only for glm47 since only that
+        // parser emits <tool_call> XML that can be truncated at max_tokens.
+        // Tracks buffered input, emitted bytes, and successful tool_call emission
+        // per choice.index so n > 1 is handled correctly.
         #[derive(Default)]
         struct ChoiceRecovery {
             input_text: String,
             emitted_content_len: usize,
             saw_tool_call: bool,
         }
+        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
         let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let choice_recovery_in = Arc::clone(&choice_recovery);
@@ -2767,12 +2769,14 @@ impl OpenAIPreprocessor {
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
             }
-            // Accumulate input content per choice for truncation recovery below.
-            if let Some(data) = &a.data {
-                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
-                for choice in &data.inner.choices {
-                    if let Some(content) = &choice.delta.content {
-                        cr.entry(choice.index).or_default().input_text.push_str(content);
+            // Buffer input content only for glm47 (truncation recovery).
+            if is_glm47 {
+                if let Some(data) = &a.data {
+                    let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                    for choice in &data.inner.choices {
+                        if let Some(content) = &choice.delta.content {
+                            cr.entry(choice.index).or_default().input_text.push_str(content);
+                        }
                     }
                 }
             }
@@ -2793,7 +2797,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -2817,41 +2821,65 @@ impl OpenAIPreprocessor {
                 error: a.error.map(DynamoError::msg),
             };
 
-            // Track per-choice state for truncated tool_call diagnostics.
-            if let Some(ref data) = nv_chunk.data {
-                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
-                for choice in &data.inner.choices {
-                    let state = cr.entry(choice.index).or_default();
-                    if let Some(content) = &choice.delta.content {
-                        state.emitted_content_len += content.len();
-                    }
-                    if choice.delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
-                        state.saw_tool_call = true;
-                    }
-                    if matches!(
-                        choice.finish_reason,
-                        Some(dynamo_protocols::types::FinishReason::Length)
-                    ) && !state.saw_tool_call
-                        && tool_call_parser.as_deref() == Some("glm47")
-                    {
-                        let dropped = state
-                            .input_text
-                            .get(state.emitted_content_len..)
-                            .unwrap_or("");
-                        if !dropped.is_empty() && dropped.contains("<tool_call>") {
-                            // Truncated tool_call: finish_reason=length with empty turn.
-                            // Raw XML is NOT emitted into content (strict schema invariant).
-                            tracing::warn!(
-                                choice_index = choice.index,
-                                dropped_bytes = dropped.len(),
-                                "glm47 streaming: truncated <tool_call> on length finish                                  (empty turn returned; no markup in content)"
-                            );
+            // glm47 only: detect and recover truncated <tool_call> blocks.
+            // When finish_reason=length arrives for a choice that never had a
+            // successful tool_call chunk, emit the dropped text as a content
+            // delta before the finish chunk (TRT-LLM parity).
+            // NOTE: the recovered content WILL contain raw <tool_call> markup.
+            // This is the documented TRT-LLM parity fallback; callers requiring
+            // strict "no tool tags in content" must filter on finish_reason=length.
+            let mut recovery: Option<Annotated<NvCreateChatCompletionStreamResponse>> = None;
+            if is_glm47 {
+                if let Some(ref data) = nv_chunk.data {
+                    let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                    for choice in &data.inner.choices {
+                        let state = cr.entry(choice.index).or_default();
+                        if let Some(content) = &choice.delta.content {
+                            state.emitted_content_len += content.len();
+                        }
+                        if choice.delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
+                            state.saw_tool_call = true;
+                        }
+                        if matches!(
+                            choice.finish_reason,
+                            Some(dynamo_protocols::types::FinishReason::Length)
+                        ) && !state.saw_tool_call
+                        {
+                            let dropped = state
+                                .input_text
+                                .get(state.emitted_content_len..)
+                                .unwrap_or("")
+                                .to_string();
+                            if !dropped.is_empty() && dropped.contains("<tool_call>") {
+                                tracing::warn!(
+                                    choice_index = choice.index,
+                                    dropped_bytes = dropped.len(),
+                                    "glm47 streaming: partial <tool_call> emitted as content                                      on length finish (TRT-LLM parity; raw markup in content)"
+                                );
+                                let mut rec = nv_chunk.clone();
+                                if let Some(ref mut rd) = rec.data {
+                                    rd.inner.usage = None;
+                                    rd.llm_metrics = None;
+                                    rd.inner.choices.retain(|c| c.index == choice.index);
+                                    for rc in &mut rd.inner.choices {
+                                        rc.delta.content = Some(dropped.clone());
+                                        rc.delta.tool_calls = None;
+                                        rc.finish_reason = None;
+                                    }
+                                }
+                                recovery = Some(rec);
+                            }
                         }
                     }
                 }
             }
 
-            nv_chunk
+            let mut out = Vec::with_capacity(if recovery.is_some() { 2 } else { 1 });
+            if let Some(r) = recovery {
+                out.push(r);
+            }
+            out.push(nv_chunk);
+            futures::stream::iter(out)
         })
     }
 
