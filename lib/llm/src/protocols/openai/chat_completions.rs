@@ -125,7 +125,6 @@ pub struct NvCreateChatCompletionRequest {
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
-
 }
 
 impl NvCreateChatCompletionRequest {

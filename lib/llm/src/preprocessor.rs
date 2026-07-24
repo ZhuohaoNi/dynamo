@@ -2749,13 +2749,10 @@ impl OpenAIPreprocessor {
 
         // Per-choice recovery state — allocated only for glm47 since only that
         // parser emits <tool_call> XML that can be truncated at max_tokens.
-        // Tracks buffered input, emitted bytes, and successful tool_call emission
-        // per choice.index so n > 1 is handled correctly.
+        // Buffers raw input per choice.index so n > 1 is handled correctly.
         #[derive(Default)]
         struct ChoiceRecovery {
             input_text: String,
-            emitted_content_len: usize,
-            saw_tool_call: bool,
         }
         let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
         let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
@@ -2824,10 +2821,10 @@ impl OpenAIPreprocessor {
                 error: a.error.map(DynamoError::msg),
             };
 
-            // glm47 only: detect and recover truncated <tool_call> blocks.
-            // When finish_reason=length arrives for a choice that never had a
-            // successful tool_call chunk, emit the dropped text as a content
-            // delta before the finish chunk (TRT-LLM parity).
+            // glm47 only: recover the last incomplete <tool_call> block on
+            // finish_reason=length. rfind skips any complete blocks (those with
+            // a closing tag), so earlier parsed tool calls are never duplicated
+            // as raw content. Mirrors the non-streaming path in aggregator.rs.
             // NOTE: recovered content WILL contain raw <tool_call> markup.
             // Callers requiring strict "no tool tags in content" must filter on
             // finish_reason=length. A separate recovery chunk is emitted per
@@ -2838,40 +2835,40 @@ impl OpenAIPreprocessor {
                     let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
                     for choice in &data.inner.choices {
                         let state = cr.entry(choice.index).or_default();
-                        if let Some(content) = &choice.delta.content {
-                            state.emitted_content_len += content.len();
-                        }
-                        if choice.delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
-                            state.saw_tool_call = true;
-                        }
-                        // Recover even when an earlier tool call was already parsed:
-                    // if max_tokens truncates inside a second <tool_call>, the
-                    // jail drops it silently regardless of state.saw_tool_call.
-                    if matches!(
-                        choice.finish_reason,
-                        Some(dynamo_protocols::types::FinishReason::Length)
-                    ) {
-                            let dropped = state
-                                .input_text
-                                .get(state.emitted_content_len..)
-                                .unwrap_or("")
-                                .to_string();
-                            if !dropped.is_empty() && dropped.contains("<tool_call>") {
+                        if matches!(
+                            choice.finish_reason,
+                            Some(dynamo_protocols::types::FinishReason::Length)
+                        ) {
+                            // Recover the last <tool_call> block that has no matching
+                            // </tool_call>. Using rfind means complete blocks (with a
+                            // closing tag) are never re-emitted, even when earlier tool
+                            // calls were already parsed and emitted structurally. Mirrors
+                            // the non-streaming path in aggregator.rs.
+                            let recovered =
+                                state.input_text.rfind("<tool_call>").and_then(|start| {
+                                    let tail = &state.input_text[start..];
+                                    if !tail.contains("</tool_call>") {
+                                        Some(tail.to_string())
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some(recovered) = recovered {
                                 tracing::warn!(
                                     choice_index = choice.index,
-                                    dropped_bytes = dropped.len(),
-                                    "glm47 streaming: partial <tool_call> emitted as content                                      on length finish (TRT-LLM parity; raw markup in content)"
+                                    recovered_bytes = recovered.len(),
+                                    "glm47 streaming: partial <tool_call> emitted as content \
+                                     on length finish (TRT-LLM parity; raw markup in content)"
                                 );
-                                // Emit one recovery chunk per affected choice so a finish
-                                // chunk with multiple truncated choices (n > 1) is handled
-                                // correctly without overwriting earlier recoveries.
+                                // Emit one recovery chunk per affected choice so n > 1 is
+                                // handled correctly without overwriting earlier recoveries.
                                 let mut rec = nv_chunk.clone();
                                 if let Some(ref mut rd) = rec.data {
                                     rd.inner.usage = None;
                                     rd.llm_metrics = None;
                                     rd.inner.choices.retain(|c| c.index == choice.index);
                                     for rc in &mut rd.inner.choices {
-                                        rc.delta.content = Some(dropped.clone());
+                                        rc.delta.content = Some(recovered.clone());
                                         rc.delta.tool_calls = None;
                                         rc.finish_reason = None;
                                     }

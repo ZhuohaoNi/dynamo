@@ -144,8 +144,7 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
     // 2. Embedded template in tokenizer_config.json (mdc.prompt_formatter).
     // ModelDeploymentCard::from_repo_checkout stores the tokenizer_config.json here
     // for normal HF models; chat_template_file is None unless a separate file exists.
-    if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(f)) = mdc.prompt_formatter.as_ref()
-    {
+    if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(f)) = mdc.prompt_formatter.as_ref() {
         if let Some(s) = read_embedded(f) {
             return Some(s);
         }
@@ -200,7 +199,10 @@ mod tests {
         }]);
         normalize_tool_call_arguments(&mut msgs);
         let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
-        assert!(args.is_object(), "arguments should be an object after normalization");
+        assert!(
+            args.is_object(),
+            "arguments should be an object after normalization"
+        );
         assert_eq!(args["path"], "/tmp/foo");
     }
 
@@ -248,8 +250,8 @@ mod tests {
         )
         .expect("write");
 
-        let checked = crate::common::checked_file::CheckedFile::from_disk(&tc_path)
-            .expect("CheckedFile");
+        let checked =
+            crate::common::checked_file::CheckedFile::from_disk(&tc_path).expect("CheckedFile");
 
         // Build a minimal MDC with only prompt_formatter set.
         let mut mdc = ModelDeploymentCard::default();
@@ -279,12 +281,14 @@ mod tests {
         )
         .expect("write");
 
-        let checked = crate::common::checked_file::CheckedFile::from_disk(&path)
-            .expect("CheckedFile");
+        let checked =
+            crate::common::checked_file::CheckedFile::from_disk(&path).expect("CheckedFile");
 
         let mut mdc = ModelDeploymentCard::default();
-        mdc.chat_template_file =
-            Some(PromptFormatterArtifact::HfChatTemplateJson { file: checked, is_custom: false });
+        mdc.chat_template_file = Some(PromptFormatterArtifact::HfChatTemplateJson {
+            file: checked,
+            is_custom: false,
+        });
 
         let text = mdc_jinja_template_text(&mdc).expect("template");
         assert_eq!(
