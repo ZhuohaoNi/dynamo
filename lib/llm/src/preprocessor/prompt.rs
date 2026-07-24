@@ -37,33 +37,37 @@ pub trait MediaRequestExt {
 
 /// Whether a model's Jinja chat template expects tool_calls[*].function.arguments
 /// as a parsed object (dict) rather than a JSON-object string.
-/// GLM-5.2 does (`{% for k, v in _args.items() %}`); other models may not.
+/// GLM-5.2 uses `{% for k, v in _args.items() %}` in chat_template.jinja.
+/// Gated on "glm-5" / "glm5" to avoid altering rendering for other GLM variants.
 pub(crate) fn template_wants_arguments_as_dict(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    m.contains("glm")
+    m.contains("glm-5") || m.contains("glm5")
 }
 
 /// Parse `tool_calls[*].function.arguments` from JSON string to object in a
 /// serialized messages array before handing it to MiniJinja.
-/// Only applied for models whose template requires a dict (see `template_wants_arguments_as_dict`).
+/// Only applied for models whose template iterates arguments as a dict
+/// (see `template_wants_arguments_as_dict`).
 pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Value) {
-    if let Some(msgs) = messages_json.as_array_mut() {
-        for msg in msgs.iter_mut() {
-            if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
-                for tc in tool_calls.iter_mut() {
-                    if let Some(args_str) = tc
-                        .pointer("/function/arguments")
-                        .and_then(|v| v.as_str())
-                    {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) {
-                            if let Some(fn_obj) = tc.get_mut("function") {
-                                if let Some(obj) = fn_obj.as_object_mut() {
-                                    obj.insert("arguments".to_string(), parsed);
-                                }
-                            }
-                        }
-                    }
-                }
+    let Some(messages) = messages_json.as_array_mut() else {
+        return;
+    };
+    for message in messages {
+        let Some(tool_calls) = message
+            .get_mut("tool_calls")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for tc in tool_calls.iter_mut() {
+            let Some(args_str) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) else {
+                continue;
+            };
+            if let Some(obj) = tc.get_mut("function").and_then(serde_json::Value::as_object_mut) {
+                obj.insert("arguments".to_string(), parsed);
             }
         }
     }

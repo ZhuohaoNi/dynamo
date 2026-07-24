@@ -2815,18 +2815,23 @@ impl OpenAIPreprocessor {
                     if choice.delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
                         state.saw_tool_call = true;
                     }
-                    // On length finish: recover only if no tool_call was seen for
-                    // this choice and the unread input tail contains <tool_call>.
+                    // On length finish: recover only for glm47 parser if no tool_call
+                    // was seen for this choice and the unread input tail has <tool_call>.
+                    // The recovery is glm47-specific because <tool_call> is GLM's markup.
                     if matches!(
                         choice.finish_reason,
                         Some(dynamo_protocols::types::FinishReason::Length)
                     ) && !state.saw_tool_call
+                        && tool_call_parser.as_deref() == Some("glm47")
                     {
-                        let dropped = if state.emitted_content_len < state.input_text.len() {
-                            state.input_text[state.emitted_content_len..].to_string()
-                        } else {
-                            String::new()
-                        };
+                        // Safe byte-boundary slicing: emitted_content_len counts output bytes
+                        // which should align with input for prose-passthrough parsers, but
+                        // use get() to avoid panicking on mismatched offsets or non-ASCII.
+                        let dropped = state
+                            .input_text
+                            .get(state.emitted_content_len..)
+                            .unwrap_or("")
+                            .to_string();
                         if !dropped.is_empty() && dropped.contains("<tool_call>") {
                             tracing::debug!(
                                 choice_index = choice.index,

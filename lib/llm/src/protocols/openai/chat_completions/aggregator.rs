@@ -419,18 +419,19 @@ impl DeltaAggregator {
                     choice.text = content.unwrap_or_default();
                 } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();
-                } else if matches!(
-                    choice.finish_reason,
-                    Some(dynamo_protocols::types::FinishReason::Length)
-                ) && choice.text.contains("<tool_call>")
+                } else if parser == "glm47"
+                    && matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    )
+                    && choice.text.contains("<tool_call>")
                 {
-                    // The parser dropped a truncated tool_call block (no end fence, hit
-                    // max_tokens). Preserve the raw text as content so the client sees the
-                    // partial output rather than an empty assistant turn, matching TRT-LLM
-                    // behavior where the partial XML is returned as content.
+                    // GLM-4.7/5.2 glm47 parser dropped a truncated <tool_call> block
+                    // (no closing </tool_call>, hit max_tokens). Preserve the raw text
+                    // as content so the client receives it rather than an empty turn.
                     tracing::debug!(
                         parser,
-                        "preserving truncated tool_call text as content on length finish"
+                        "glm47: preserving truncated tool_call as content on length finish"
                     );
                     // choice.text already holds the raw text; leave it as-is.
                 }
