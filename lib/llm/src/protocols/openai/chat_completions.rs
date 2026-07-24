@@ -126,11 +126,6 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 
-    /// How the loaded Jinja chat template expects tool_calls[*].function.arguments.
-    /// Set by OpenAIPreprocessor after construction, before template rendering.
-    /// Serde-skipped: never read from or written to the wire.
-    #[serde(skip)]
-    pub tool_arguments_mode: crate::preprocessor::prompt::ToolArgumentsMode,
 }
 
 impl NvCreateChatCompletionRequest {

@@ -59,6 +59,25 @@ pub fn detect_tool_arguments_mode(template: &str) -> ToolArgumentsMode {
     }
 }
 
+/// Thread-local argument mode set by preprocessor before each formatter.render() call.
+/// Using a thread-local avoids adding a field to NvCreateChatCompletionRequest (which
+/// would require updating every struct literal in the codebase).
+thread_local! {
+    static RENDER_TOOL_ARGUMENTS_MODE: std::cell::Cell<ToolArgumentsMode> =
+        const { std::cell::Cell::new(ToolArgumentsMode::JsonString) };
+}
+
+/// Set the thread-local mode before calling formatter.render(); resets automatically
+/// to JsonString after the render call (caller should reset or use RAII if needed).
+pub(crate) fn set_tool_arguments_mode_for_render(mode: ToolArgumentsMode) {
+    RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.set(mode));
+}
+
+/// Read the current thread-local argument mode (called from messages()).
+pub(crate) fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
+    RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.get())
+}
+
 /// Read the Jinja template text from a ModelDeploymentCard, if available.
 /// Returns None for models whose template is embedded in tokenizer_config.json
 /// (those use the renderer's internal template logic, not a standalone Jinja file).
@@ -110,7 +129,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         // Normalize tool_calls[*].function.arguments from JSON string to object when
         // the loaded Jinja template requires dict args (e.g. GLM-5.2 .items() call).
         // The mode is written by OpenAIPreprocessor::preprocess before template render.
-        if self.tool_arguments_mode == ToolArgumentsMode::ParsedObject {
+        if get_tool_arguments_mode_for_render() == ToolArgumentsMode::ParsedObject {
             normalize_tool_call_arguments(&mut messages_json);
         }
         Value::from_serialize(&messages_json)

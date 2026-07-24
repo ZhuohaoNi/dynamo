@@ -76,7 +76,7 @@ use crate::protocols::{
 };
 use crate::tokenizers::traits::Tokenizer;
 
-use crate::preprocessor::prompt:{MediaRequestExt, ToolArgumentsMode, detect_tool_arguments_mode, mdc_jinja_template_text, normalize_tool_call_arguments, prompt_formatter_from_mdc};
+use crate::preprocessor::prompt::{MediaRequestExt, ToolArgumentsMode, detect_tool_arguments_mode, mdc_jinja_template_text, normalize_tool_call_arguments, prompt_formatter_from_mdc};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
@@ -2844,30 +2844,15 @@ impl OpenAIPreprocessor {
                             .unwrap_or("")
                             .to_string();
                         if !dropped.is_empty() && dropped.contains("<tool_call>") {
-                            // Deliberate TRT-LLM parity: partial <tool_call> XML emitted
-                            // as content when max_tokens truncates mid-stream. This is an
-                            // intentional fallback; content WILL contain raw tool-call
-                            // markup. Clients requiring strict "no tool tags in content"
-                            // invariant must filter on finish_reason=length.
+                            // The glm47 parser dropped an incomplete <tool_call> block
+                            // on max_tokens truncation. We do NOT emit the raw markup as
+                            // content (that would violate "no tool tags in content").
+                            // finish_reason=length is sufficient signal to the client.
                             tracing::warn!(
                                 choice_index = choice.index,
                                 dropped_bytes = dropped.len(),
-                                "glm47 streaming: partial <tool_call> emitted as content                                  (length finish, TRT-LLM parity fallback — raw markup in content)"
+                                "glm47 streaming: truncated <tool_call> dropped on length finish                                  (finish_reason=length preserved; no markup emitted into content)"
                             );
-                            // Synthesize a content chunk scoped to this choice only.
-                            let mut recovery = nv_chunk.clone();
-                            if let Some(ref mut rd) = recovery.data {
-                                rd.inner.usage = None;
-                                rd.llm_metrics = None;
-                                // Keep only the triggering choice in the recovery chunk.
-                                rd.inner.choices.retain(|c| c.index == choice.index);
-                                for rc in &mut rd.inner.choices {
-                                    rc.delta.content = Some(dropped.clone());
-                                    rc.delta.tool_calls = None;
-                                    rc.finish_reason = None;
-                                }
-                            }
-                            extras.push(recovery);
                         }
                     }
                 }
@@ -3454,9 +3439,9 @@ impl
                 .is_some_and(|flag| *flag),
         };
 
-        // Stamp the template-derived argument mode onto the request so messages()
-        // can normalize tool_calls[*].function.arguments without accessing the formatter.
-        request.tool_arguments_mode = self.tool_arguments_mode;
+        // Set thread-local argument mode so messages() can normalize
+        // tool_calls[*].function.arguments without a field on the request type.
+        crate::preprocessor::prompt::set_tool_arguments_mode_for_render(self.tool_arguments_mode);
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning) = self
