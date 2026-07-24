@@ -470,7 +470,6 @@ mod tests {
         let hint = RouterHint {
             source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
             block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
-            target_cached_prefix_blocks: 1,
         };
 
         req.attach_router_hint(&hint).unwrap();
@@ -488,10 +487,6 @@ mod tests {
         assert_eq!(
             extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
             serde_json::json!([11, 22])
-        );
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["target_cached_prefix_blocks"],
-            serde_json::json!(1)
         );
     }
 
@@ -522,7 +517,6 @@ mod tests {
             let hint = RouterHint {
                 source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
                 block_hashes: vec![ExternalSequenceBlockHash(33)],
-                target_cached_prefix_blocks: 2,
             };
 
             req.attach_router_hint(&hint).unwrap();
@@ -532,10 +526,6 @@ mod tests {
             assert_eq!(
                 extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
                 serde_json::json!([33])
-            );
-            assert_eq!(
-                extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["target_cached_prefix_blocks"],
-                serde_json::json!(2)
             );
         }
     }

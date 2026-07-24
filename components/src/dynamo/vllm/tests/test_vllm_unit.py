@@ -1105,7 +1105,6 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
     router_hint = {
         "source_control_endpoint": "tcp://127.0.0.1:23280",
         "block_hashes": [11, 22],
-        "target_cached_prefix_blocks": 0,
     }
     request = {
         "token_ids": [1, 2, 3],
