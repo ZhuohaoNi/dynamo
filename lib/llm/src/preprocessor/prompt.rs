@@ -109,7 +109,7 @@ pub(crate) fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
 /// `.items()` on tool-call arguments.
 pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
     // Helper: extract the "chat_template" string from a tokenizer_config.json file.
-    fn read_embedded(checked_file: &crate::model_card::CheckedFile) -> Option<String> {
+    fn read_embedded(checked_file: &crate::common::checked_file::CheckedFile) -> Option<String> {
         let path = checked_file.path()?;
         let contents = std::fs::read_to_string(path).ok()?;
         let config: serde_json::Value = serde_json::from_str(&contents).ok()?;
