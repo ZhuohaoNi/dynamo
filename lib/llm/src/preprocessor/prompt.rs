@@ -59,10 +59,11 @@ pub fn detect_tool_arguments_mode(template: &str) -> ToolArgumentsMode {
     }
 }
 
-/// Thread-local argument mode set by preprocessor before each formatter.render() call.
-/// Using a thread-local avoids adding a field to NvCreateChatCompletionRequest (which
-/// would require updating every struct literal in the codebase).
 thread_local! {
+    /// Argument mode for the current formatter.render() call. Set by the preprocessor
+    /// immediately before the synchronous `apply_template` invocation; never across an
+    /// `.await` point. Using a thread-local avoids adding a field to
+    /// `NvCreateChatCompletionRequest` (which would require updating every struct literal).
     static RENDER_TOOL_ARGUMENTS_MODE: std::cell::Cell<ToolArgumentsMode> =
         const { std::cell::Cell::new(ToolArgumentsMode::JsonString) };
 }
@@ -96,14 +97,26 @@ pub(crate) fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
     RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.get())
 }
 
-/// Read the Jinja template text from a ModelDeploymentCard, if available.
-/// Returns None for models whose template is embedded in tokenizer_config.json
-/// (those use the renderer's internal template logic, not a standalone Jinja file).
+/// Extract the Jinja template source from a ModelDeploymentCard for analysis.
+///
+/// Checks both standalone `.jinja` files and the `chat_template` field embedded
+/// in `tokenizer_config.json`, so models that ship only a tokenizer config are
+/// not silently left in `JsonString` mode when their template requires dict args.
 pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
     match mdc.chat_template_file.as_ref()? {
         PromptFormatterArtifact::HfChatTemplateJinja { file, .. } => {
             let path = file.path()?;
             std::fs::read_to_string(path).ok()
+        }
+        PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) => {
+            // Embedded template: read the JSON and extract the "chat_template" string.
+            let path = checked_file.path()?;
+            let contents = std::fs::read_to_string(path).ok()?;
+            let config: serde_json::Value = serde_json::from_str(&contents).ok()?;
+            config
+                .get("chat_template")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
         }
         _ => None,
     }
