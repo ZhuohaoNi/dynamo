@@ -2771,7 +2771,9 @@ impl OpenAIPreprocessor {
                 if let Some(data) = &a.data {
                     let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
                     for choice in &data.inner.choices {
-                        if let Some(content) = &choice.delta.content {
+                        if let Some(ChatCompletionMessageContent::Text(content)) =
+                            &choice.delta.content
+                        {
                             cr.entry(choice.index)
                                 .or_default()
                                 .input_text
@@ -2868,7 +2870,9 @@ impl OpenAIPreprocessor {
                                     rd.llm_metrics = None;
                                     rd.inner.choices.retain(|c| c.index == choice.index);
                                     for rc in &mut rd.inner.choices {
-                                        rc.delta.content = Some(recovered.clone());
+                                        rc.delta.content = Some(
+                                            ChatCompletionMessageContent::Text(recovered.clone()),
+                                        );
                                         rc.delta.tool_calls = None;
                                         rc.finish_reason = None;
                                     }
@@ -3573,6 +3577,7 @@ impl
             &next,
             &self.formatter,
             &self.tokenizer,
+            self.tool_arguments_mode,
         );
 
         let final_stream = crate::request_trace::wrap_chat_request_end_stream(
