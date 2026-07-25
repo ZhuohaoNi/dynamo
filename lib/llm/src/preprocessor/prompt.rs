@@ -48,8 +48,6 @@ pub enum ToolArgumentsMode {
     ParsedObject,
 }
 
-/// Inspect a Jinja template source and return the required argument mode.
-/// Scans for common patterns that call `.items()` on tool-call arguments.
 pub fn detect_tool_arguments_mode(template: &str) -> ToolArgumentsMode {
     // GLM-5.2: `{% set _args = tc.arguments %}{% for k, v in _args.items() %}`
     if template.contains("_args.items()") || template.contains("arguments.items()") {
@@ -69,13 +67,11 @@ thread_local! {
 }
 
 /// RAII guard that sets the thread-local tool-argument mode for the duration of a
-/// synchronous rendering call and resets it to JsonString on drop.
+/// synchronous rendering call and restores the previous mode on drop.
 ///
-/// SAFETY: Only use this guard in a *synchronous* (non-`async`) scope with no
-/// `.await` between guard creation and drop. Thread-locals are unsafe across
+/// SAFETY: Only use in a *synchronous* (non-`async`) scope with no `.await`
+/// between guard creation and drop. Thread-locals are not preserved across
 /// async executor boundaries — the task may resume on a different OS thread.
-/// `apply_template` is sync; the caller must ensure no `.await` intervenes.
-/// Saves the previous thread-local mode and restores it on drop.
 pub(crate) struct ToolArgumentsModeGuard {
     previous: ToolArgumentsMode,
 }
@@ -108,9 +104,6 @@ pub(crate) fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
 /// silently left in [`ToolArgumentsMode::JsonString`] when their template calls
 /// `.items()` on tool-call arguments.
 pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
-    // Helper: extract the "chat_template" string from a tokenizer_config.json file.
-    // Handles both the common string layout and the HF array-of-variants layout
-    // [{name, template}, ...], scanning each variant's "template" value.
     fn read_embedded(checked_file: &crate::common::checked_file::CheckedFile) -> Option<String> {
         let path = checked_file.path()?;
         let contents = std::fs::read_to_string(path).ok()?;
@@ -119,8 +112,8 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
         if let Some(s) = value.as_str() {
             return Some(s.to_owned());
         }
-        // Array of {name, template} variants — concatenate all template strings
-        // so the presence of .items() in any variant is detectable.
+        // Some HF configs store templates as [{name, template}, ...]. Concatenate
+        // so .items() in any variant is visible to detect_tool_arguments_mode.
         if let Some(arr) = value.as_array() {
             let combined: String = arr
                 .iter()
@@ -134,7 +127,6 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
         None
     }
 
-    // 1. Standalone template file.
     if let Some(artifact) = mdc.chat_template_file.as_ref() {
         match artifact {
             PromptFormatterArtifact::HfChatTemplateJinja { file, .. } => {
@@ -144,8 +136,8 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
                     }
                 }
             }
-            // chat_template.json — same JSON layout as tokenizer_config.json
-            // (a "chat_template" key whose value is the Jinja string).
+            // HfChatTemplateJson and HfTokenizerConfigJson both embed the template
+            // under the "chat_template" JSON key; read_embedded handles both.
             PromptFormatterArtifact::HfChatTemplateJson { file, .. }
             | PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
                 if let Some(s) = read_embedded(file) {
@@ -156,9 +148,8 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
         }
     }
 
-    // 2. Embedded template in tokenizer_config.json (mdc.prompt_formatter).
-    // ModelDeploymentCard::from_repo_checkout stores the tokenizer_config.json here
-    // for normal HF models; chat_template_file is None unless a separate file exists.
+    // Fallback: normal HF layout stores tokenizer_config.json in mdc.prompt_formatter;
+    // chat_template_file is None unless a separate template file was present.
     if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(f)) = mdc.prompt_formatter.as_ref() {
         if let Some(s) = read_embedded(f) {
             return Some(s);
@@ -334,8 +325,7 @@ pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Valu
             let value = match serde_json::from_str::<serde_json::Value>(args_str) {
                 Ok(v) if v.is_object() => v,
                 Ok(_) => {
-                    // Parsed to a scalar or array — GLM's .items() would panic.
-                    // Substitute an empty object so the template renders safely.
+                    // Scalar or array — GLM's .items() would panic at render time.
                     tracing::warn!(
                         args_len = args_str.len(),
                         "tool_call arguments parsed to a non-object; \
@@ -344,7 +334,6 @@ pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Valu
                     serde_json::Value::Object(serde_json::Map::new())
                 }
                 Err(_) => {
-                    // Malformed JSON — same safe fallback.
                     tracing::warn!(
                         args_len = args_str.len(),
                         "tool_call arguments are not valid JSON; \

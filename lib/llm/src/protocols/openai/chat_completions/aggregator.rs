@@ -388,16 +388,13 @@ impl DeltaAggregator {
                 // (tool_choice=required/named or structural-tag, gated by
                 // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
                 // keep the v1 finalize path.
-                // For glm47 on length finish: extract the truncated tail BEFORE parsing
-                // so we can emit it even when earlier tool calls were fully parsed.
-                // A second <tool_call> block truncated after a complete first one would
-                // otherwise be silently dropped by the parser.
+                // Extract the truncated tail BEFORE parsing so a second <tool_call>
+                // truncated after a complete first one is not silently dropped.
                 let glm47_truncated_tail = if parser == "glm47"
                     && matches!(
                         choice.finish_reason,
                         Some(dynamo_protocols::types::FinishReason::Length)
                     ) {
-                    // Find the last incomplete <tool_call> block (no matching </tool_call>).
                     choice.text.rfind("<tool_call>").and_then(|start| {
                         let tail = &choice.text[start..];
                         if !tail.contains("</tool_call>") {
@@ -449,8 +446,6 @@ impl DeltaAggregator {
                     )
                     && choice.text.contains("<tool_call>")
                 {
-                    // No complete tool calls parsed; the entire text is a truncated block.
-                    // Preserve as content (TRT-LLM parity; raw <tool_call> in content).
                     tracing::warn!(
                         parser,
                         "glm47: partial <tool_call> returned as content on length finish \
@@ -458,9 +453,8 @@ impl DeltaAggregator {
                     );
                 }
 
-                // Append any truncated tail discovered before parsing.
-                // This handles a second (or later) <tool_call> truncated after an earlier
-                // complete one — the parser drops it silently, so we recover it here.
+                // Recover any tail saved before parsing — the parser drops a truncated
+                // second block silently when an earlier complete block was already parsed.
                 if let Some(tail) = glm47_truncated_tail {
                     if !choice.text.contains(&tail) {
                         tracing::warn!(

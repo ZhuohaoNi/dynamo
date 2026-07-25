@@ -870,9 +870,6 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
-            // Hold the RAII guard for the synchronous apply_template call only.
-            // No .await occurs between guard creation and drop, so thread-local
-            // access is safe. The guard resets to JsonString on drop.
             let _mode_guard = ToolArgumentsModeGuard::new(self.tool_arguments_mode);
             self.apply_template(request)
                 .with_context(|| "Failed to apply prompt template")?
@@ -2823,14 +2820,11 @@ impl OpenAIPreprocessor {
                 error: a.error.map(DynamoError::msg),
             };
 
-            // glm47 only: recover the last incomplete <tool_call> block on
-            // finish_reason=length. rfind skips any complete blocks (those with
-            // a closing tag), so earlier parsed tool calls are never duplicated
-            // as raw content. Mirrors the non-streaming path in aggregator.rs.
-            // NOTE: recovered content WILL contain raw <tool_call> markup.
-            // Callers requiring strict "no tool tags in content" must filter on
-            // finish_reason=length. A separate recovery chunk is emitted per
-            // affected choice so n > 1 is handled correctly.
+            // glm47: on finish_reason=length, recover the last incomplete <tool_call>
+            // block. rfind skips complete blocks, so earlier parsed tool calls are
+            // never duplicated as raw content. Recovered content WILL contain raw
+            // <tool_call> markup — callers that require strict "no tool tags in content"
+            // must filter on finish_reason=length.
             let mut recoveries: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
             if is_glm47 {
                 if let Some(ref data) = nv_chunk.data {
@@ -2841,11 +2835,6 @@ impl OpenAIPreprocessor {
                             choice.finish_reason,
                             Some(dynamo_protocols::types::FinishReason::Length)
                         ) {
-                            // Recover the last <tool_call> block that has no matching
-                            // </tool_call>. Using rfind means complete blocks (with a
-                            // closing tag) are never re-emitted, even when earlier tool
-                            // calls were already parsed and emitted structurally. Mirrors
-                            // the non-streaming path in aggregator.rs.
                             let recovered =
                                 state.input_text.rfind("<tool_call>").and_then(|start| {
                                     let tail = &state.input_text[start..];
@@ -2862,8 +2851,6 @@ impl OpenAIPreprocessor {
                                     "glm47 streaming: partial <tool_call> emitted as content \
                                      on length finish (TRT-LLM parity; raw markup in content)"
                                 );
-                                // Emit one recovery chunk per affected choice so n > 1 is
-                                // handled correctly without overwriting earlier recoveries.
                                 let mut rec = nv_chunk.clone();
                                 if let Some(ref mut rd) = rec.data {
                                     rd.inner.usage = None;
