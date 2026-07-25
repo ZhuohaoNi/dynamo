@@ -453,7 +453,8 @@ impl DeltaAggregator {
                     // Preserve as content (TRT-LLM parity; raw <tool_call> in content).
                     tracing::warn!(
                         parser,
-                        "glm47: partial <tool_call> returned as content on length finish                          (TRT-LLM parity; raw markup in content)"
+                        "glm47: partial <tool_call> returned as content on length finish \
+                         (TRT-LLM parity; raw markup in content)"
                     );
                 }
 
@@ -465,7 +466,8 @@ impl DeltaAggregator {
                         tracing::warn!(
                             parser,
                             tail_bytes = tail.len(),
-                            "glm47: truncated later <tool_call> appended as content                              (TRT-LLM parity; raw markup in content)"
+                            "glm47: truncated later <tool_call> appended as content \
+                         (TRT-LLM parity; raw markup in content)"
                         );
                         if choice.text.is_empty() {
                             choice.text = tail;

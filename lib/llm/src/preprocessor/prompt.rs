@@ -109,14 +109,29 @@ pub(crate) fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
 /// `.items()` on tool-call arguments.
 pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
     // Helper: extract the "chat_template" string from a tokenizer_config.json file.
+    // Handles both the common string layout and the HF array-of-variants layout
+    // [{name, template}, ...], scanning each variant's "template" value.
     fn read_embedded(checked_file: &crate::common::checked_file::CheckedFile) -> Option<String> {
         let path = checked_file.path()?;
         let contents = std::fs::read_to_string(path).ok()?;
         let config: serde_json::Value = serde_json::from_str(&contents).ok()?;
-        config
-            .get("chat_template")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
+        let value = config.get("chat_template")?;
+        if let Some(s) = value.as_str() {
+            return Some(s.to_owned());
+        }
+        // Array of {name, template} variants — concatenate all template strings
+        // so the presence of .items() in any variant is detectable.
+        if let Some(arr) = value.as_array() {
+            let combined: String = arr
+                .iter()
+                .filter_map(|v| v.get("template").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !combined.is_empty() {
+                return Some(combined);
+            }
+        }
+        None
     }
 
     // 1. Standalone template file.
@@ -316,14 +331,33 @@ pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Valu
             let Some(args_str) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) else {
-                continue;
+            let value = match serde_json::from_str::<serde_json::Value>(args_str) {
+                Ok(v) if v.is_object() => v,
+                Ok(_) => {
+                    // Parsed to a scalar or array — GLM's .items() would panic.
+                    // Substitute an empty object so the template renders safely.
+                    tracing::warn!(
+                        args = args_str,
+                        "tool_call arguments parsed to a non-object; \
+                         substituting {{}} for GLM template safety"
+                    );
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
+                Err(_) => {
+                    // Malformed JSON — same safe fallback.
+                    tracing::warn!(
+                        args = args_str,
+                        "tool_call arguments are not valid JSON; \
+                         substituting {{}} for GLM template safety"
+                    );
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
             };
             if let Some(obj) = tc
                 .get_mut("function")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                obj.insert("arguments".to_string(), parsed);
+                obj.insert("arguments".to_string(), value);
             }
         }
     }
