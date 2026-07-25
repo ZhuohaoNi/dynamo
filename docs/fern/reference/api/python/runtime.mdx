@@ -201,7 +201,7 @@ construct_formatter_prefix(service_name: str | None, worker_id: int | None) -> s
 </Accordion>
 
 <Accordion id="api-dynamo-runtime-dynamo-endpoint" title="dynamo_endpoint (function)">
-Decorator that parses incoming requests into Pydantic models on an async generator endpoint.
+Decorator that can parse a request payload into a Pydantic model before the endpoint runs.
 
 ```python
 from dynamo.runtime import dynamo_endpoint

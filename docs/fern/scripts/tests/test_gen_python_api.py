@@ -32,6 +32,8 @@ resolution, which is unrelated to this generator)::
 
 from __future__ import annotations
 
+import doctest
+import importlib.util
 import re
 import shutil
 from pathlib import Path
@@ -66,8 +68,8 @@ CURATED_MODULE_NAMES = {
 }
 SELECTED_DOCSTRING_SUMMARIES = {
     "dynamo.runtime.dynamo_endpoint": (
-        "Decorator that parses incoming requests into Pydantic models "
-        "on an async generator endpoint."
+        "Decorator that can parse a request payload into a Pydantic model "
+        "before the endpoint runs."
     ),
     "dynamo.planner.connectors.base.PlannerConnector": (
         "Abstract base class for planner connectors that manage scaling operations."
@@ -91,33 +93,6 @@ def all_modules(loader: GriffeLoader) -> list[api_discovery.Module]:
     return [
         api_discovery.discover_module(loader, spec) for spec in api_discovery.MODULES
     ]
-
-
-@pytest.mark.parametrize(
-    ("qualname", "expected"),
-    SELECTED_DOCSTRING_SUMMARIES.items(),
-)
-def test_selected_complex_apis_have_high_value_summaries(
-    all_modules: list[api_discovery.Module],
-    qualname: str,
-    expected: str,
-) -> None:
-    symbols = {
-        symbol.qualname: symbol for module in all_modules for symbol in module.symbols
-    }
-
-    assert symbols[qualname].summary == expected
-
-
-def test_media_url_includes_safe_rewrite_example() -> None:
-    storage = (
-        REPO_ROOT / "components" / "src" / "dynamo" / "common" / "storage.py"
-    ).read_text(encoding="utf-8")
-
-    assert (
-        '>>> get_media_url(get_fs("memory://media"), "videos/request.mp4", '
-        '"https://cdn.example.com/media")'
-    ) in storage
 
 
 @pytest.fixture(scope="session")
@@ -163,6 +138,48 @@ def workspace(tmp_path: Path) -> Path:
     (ws / "components").mkdir()
     (ws / "components" / "src").symlink_to(REPO_ROOT / "components" / "src")
     return ws
+
+
+# ---------------------------------------------------------------------------
+# Authored docstrings
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("qualname", "expected"),
+    SELECTED_DOCSTRING_SUMMARIES.items(),
+)
+def test_selected_complex_apis_have_high_value_summaries(
+    all_modules: list[api_discovery.Module],
+    qualname: str,
+    expected: str,
+) -> None:
+    symbols = {
+        symbol.qualname: symbol for module in all_modules for symbol in module.symbols
+    }
+
+    assert qualname in symbols, f"{qualname} is no longer a discovered public symbol"
+    assert symbols[qualname].summary == expected
+
+
+def test_storage_doctests_execute() -> None:
+    """Run the storage examples instead of string-matching the source.
+
+    A documented output that does not match what the code returns is a lie the
+    docs site publishes, and nothing else in this repo runs a doctest. The
+    module imports only asyncio, typing, and fsspec -- no compiled ``_core`` --
+    so it loads standalone here.
+    """
+    path = REPO_ROOT / "components" / "src" / "dynamo" / "common" / "storage.py"
+    spec = importlib.util.spec_from_file_location("dynamo_storage_under_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    results = doctest.testmod(module, verbose=False)
+
+    assert results.attempted > 0, "storage.py examples are no longer being collected"
+    assert results.failed == 0
 
 
 # ---------------------------------------------------------------------------
