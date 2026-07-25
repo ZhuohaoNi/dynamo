@@ -337,7 +337,7 @@ pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Valu
                     // Parsed to a scalar or array — GLM's .items() would panic.
                     // Substitute an empty object so the template renders safely.
                     tracing::warn!(
-                        args = args_str,
+                        args_len = args_str.len(),
                         "tool_call arguments parsed to a non-object; \
                          substituting {{}} for GLM template safety"
                     );
@@ -346,7 +346,7 @@ pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Valu
                 Err(_) => {
                     // Malformed JSON — same safe fallback.
                     tracing::warn!(
-                        args = args_str,
+                        args_len = args_str.len(),
                         "tool_call arguments are not valid JSON; \
                          substituting {{}} for GLM template safety"
                     );
