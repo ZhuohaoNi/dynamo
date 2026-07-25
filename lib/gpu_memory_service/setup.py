@@ -37,11 +37,6 @@ def _create_ext_modules():
     # No CUDA or PyTorch dependency - just provides my_malloc/my_free that call Python callbacks
     return [
         Extension(
-            name="gpu_memory_service.client.torch.extensions._allocator_ext",
-            sources=["client/torch/extensions/allocator.cpp"],
-            extra_compile_args=extra_compile_args,
-        ),
-        Extension(
             name="gpu_memory_service.core.client.torch.extensions._allocator_ext",
             sources=["core/client/torch/extensions/allocator.cpp"],
             extra_compile_args=extra_compile_args,
@@ -126,7 +121,6 @@ setup(
         "gpu_memory_service.v1.integrations.vllm": "v1/integrations/vllm",
     },
     package_data={
-        "gpu_memory_service.client.torch.extensions": ["*.cpp"],
         "gpu_memory_service.core.client.torch.extensions": ["*.cpp"],
         "gpu_memory_service.v1": ["README.md"],
     },

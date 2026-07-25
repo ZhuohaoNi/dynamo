@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Server-side lock acquisition and cleanup."""
+"""V0 operation policy and transport adapter for shared socket sessions."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable
 from typing import Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
@@ -25,8 +26,18 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataListRequest,
     MetadataPutRequest,
 )
+from gpu_memory_service.core.server.sessions import EpochClearReason
+from gpu_memory_service.core.server.sessions import (
+    GMSSessionManager as CoreSessionManager,
+)
+from gpu_memory_service.core.server.sessions import (
+    ServerSession,
+    ServerState,
+    SessionSnapshot,
+    StateEvent,
+)
 
-from .fsm import GMSFSM, Connection, ServerState, StateEvent
+from .fsm import Connection
 
 
 class OperationNotAllowed(Exception):
@@ -59,139 +70,101 @@ RO_ALLOWED: frozenset[type] = frozenset(
 RW_ALLOWED: frozenset[type] = RW_REQUIRED | RO_ALLOWED
 
 
-@dataclass(frozen=True)
-class SessionSnapshot:
-    state: ServerState
-    has_rw_session: bool
-    ro_session_count: int
-    waiting_writers: int
-    committed: bool
-    is_ready: bool
-
-
 class GMSSessionManager:
-    """Owns lock transitions, waiter coordination, and cleanup."""
+    """Adapt the V0 async transport and operation policy to shared sessions."""
 
-    def __init__(self):
-        self._locking = GMSFSM()
-        self._waiting_writers = 0
-        self._reserved_rw_session_id: Optional[str] = None
-        self._condition = asyncio.Condition()
+    def __init__(
+        self,
+        clear_epoch: Callable[[EpochClearReason, bool], None],
+    ):
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._owner_thread: int | None = None
+        self._core = CoreSessionManager(clear_epoch)
+        self._pending: dict[str, ServerSession] = {}
+        self._connections: dict[ServerSession, Connection] = {}
         self._next_session_id = 0
 
     @property
     def state(self) -> ServerState:
-        return self._locking.state
+        return self._core.state
+
+    @property
+    def rw_conn(self) -> Connection | None:
+        session = self._core.rw_session
+        return self._connections.get(session)
 
     def next_session_id(self) -> str:
         self._next_session_id += 1
         return f"session_{self._next_session_id}"
 
     def snapshot(self) -> SessionSnapshot:
-        has_rw_session = self._locking.rw_conn is not None
-        return SessionSnapshot(
-            state=self._locking.state,
-            has_rw_session=has_rw_session,
-            ro_session_count=self._locking.ro_count,
-            waiting_writers=self._waiting_writers,
-            committed=self._locking.committed,
-            is_ready=self._locking.committed and not has_rw_session,
-        )
-
-    def _can_grant_rw(self) -> bool:
-        return self._reserved_rw_session_id is None and self._locking.can_acquire_rw()
-
-    def _can_grant_ro(self) -> bool:
-        return self._reserved_rw_session_id is None and self._locking.can_acquire_ro(
-            self._waiting_writers
-        )
-
-    def _can_grant_rw_or_ro(self) -> bool:
-        if self._can_grant_ro():
-            return True
-        return self._can_grant_rw() and not self._locking.committed
+        return self._core.snapshot()
 
     async def acquire_lock(
         self,
         mode: RequestedLockType,
         timeout_ms: Optional[int],
         session_id: str,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> Optional[GrantedLockType]:
+        loop = asyncio.get_running_loop()
+        owner_thread = threading.get_ident()
+        if self._loop is None:
+            self._loop = loop
+            self._owner_thread = owner_thread
+        elif self._loop is not loop or self._owner_thread != owner_thread:
+            raise RuntimeError("V0 GMS sessions must use one event loop")
+
         timeout = timeout_ms / 1000 if timeout_ms is not None else None
-
-        if mode == RequestedLockType.RW:
-            try:
-                async with self._condition:
-                    self._waiting_writers += 1
-                    try:
-                        await asyncio.wait_for(
-                            self._condition.wait_for(self._can_grant_rw),
-                            timeout=timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        return None
-                    self._reserved_rw_session_id = session_id
-                    return GrantedLockType.RW
-            finally:
-                async with self._condition:
-                    self._waiting_writers -= 1
-                    self._condition.notify_all()
-
-        if mode == RequestedLockType.RO:
-            async with self._condition:
-                try:
-                    await asyncio.wait_for(
-                        self._condition.wait_for(self._can_grant_ro),
-                        timeout=timeout,
-                    )
-                except asyncio.TimeoutError:
-                    return None
-            return GrantedLockType.RO
-
-        async with self._condition:
-            if self._can_grant_rw() and not self._locking.committed:
-                self._reserved_rw_session_id = session_id
-                return GrantedLockType.RW
-            try:
-                await asyncio.wait_for(
-                    self._condition.wait_for(self._can_grant_rw_or_ro),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                return None
-            if self._can_grant_rw() and not self._locking.committed:
-                self._reserved_rw_session_id = session_id
-                return GrantedLockType.RW
-        return GrantedLockType.RO
+        cancelled = threading.Event()
+        acquire = asyncio.create_task(
+            asyncio.to_thread(
+                self._core.acquire,
+                mode,
+                timeout,
+                lambda: (
+                    cancelled.is_set() or (is_cancelled is not None and is_cancelled())
+                ),
+            )
+        )
+        try:
+            session = await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            cancelled.set()
+            self._core.wake_waiters()
+            session = await acquire
+            if session is not None:
+                self._core.close(session)
+            raise
+        if session is None:
+            return None
+        self._pending[session_id] = session
+        return session.mode
 
     async def cancel_connect(
         self,
         session_id: str,
         mode: Optional[GrantedLockType],
     ) -> None:
-        if mode != GrantedLockType.RW:
-            return
-        async with self._condition:
-            if self._reserved_rw_session_id == session_id:
-                self._reserved_rw_session_id = None
-                self._condition.notify_all()
+        session = self._pending.pop(session_id, None)
+        if session is not None:
+            self._core.close(session)
 
     def on_connect(self, conn: Connection) -> None:
-        if conn.mode == GrantedLockType.RW:
-            if self._reserved_rw_session_id != conn.session_id:
-                raise AssertionError(
-                    f"RW session {conn.session_id} was not reserved before connect"
-                )
-            self._reserved_rw_session_id = None
-        event = (
-            StateEvent.RW_CONNECT
-            if conn.mode == GrantedLockType.RW
-            else StateEvent.RO_CONNECT
-        )
-        self._locking.transition(event, conn)
+        session = self._pending[conn.session_id]
+        if session.mode != conn.mode:
+            raise AssertionError(
+                f"session mode changed before connect: {conn.session_id}"
+            )
+        del self._pending[conn.session_id]
+        conn.core_session = session
+        self._connections[session] = conn
 
     def on_commit(self, conn: Connection) -> None:
-        self._locking.transition(StateEvent.RW_COMMIT, conn)
+        if conn.core_session is None:
+            raise AssertionError("connection has no core session")
+        self._core.commit(conn.core_session)
+        conn.mode = conn.core_session.mode
 
     def check_operation(self, msg_type: type, conn: Connection) -> None:
         if conn.mode == GrantedLockType.RW and msg_type not in RW_ALLOWED:
@@ -208,21 +181,13 @@ class GMSSessionManager:
             )
 
     def begin_cleanup(self, conn: Optional[Connection]) -> StateEvent | None:
-        if conn is None:
+        if conn is None or conn.core_session is None:
             return None
-
-        event = None
-        if conn.mode == GrantedLockType.RW:
-            if self._locking.rw_conn is conn and not self._locking.committed:
-                self._locking.transition(StateEvent.RW_ABORT, conn)
-                event = StateEvent.RW_ABORT
-        elif conn in self._locking.ro_conns:
-            self._locking.transition(StateEvent.RO_DISCONNECT, conn)
-            event = StateEvent.RO_DISCONNECT
+        self._connections.pop(conn.core_session, None)
+        event = self._core.close(conn.core_session)
+        conn.core_session = None
         return event
 
     async def finish_cleanup(self, conn: Optional[Connection]) -> None:
         if conn is not None:
             await conn.close()
-        async with self._condition:
-            self._condition.notify_all()

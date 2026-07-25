@@ -39,6 +39,8 @@ class FakeVMM(VMMDevice):
         self.reservations: dict[int, int] = {}
         self.mapped: dict[int, tuple[int, int]] = {}
         self.access: dict[int, object] = {}
+        self.fail_reserve = False
+        self.fail_access = False
 
     def ensure_initialized(self):
         pass
@@ -63,6 +65,7 @@ class FakeVMM(VMMDevice):
     def release(self, handle):
         self.server_handles.discard(handle)
         self.imports.discard(handle)
+        self.calls.append(("release", handle))
 
     def export_to_shareable_handle(self, handle):
         if handle not in self.server_handles:
@@ -75,31 +78,41 @@ class FakeVMM(VMMDevice):
         os.close(fd)
         handle = next(self._handles)
         self.imports.add(handle)
+        self.calls.append(("import", handle))
         return handle
 
     def address_reserve(self, size, granularity):
+        if self.fail_reserve:
+            raise RuntimeError("reserve failed")
         va = next(self._vas)
         self.reservations[va] = size
+        self.calls.append(("reserve", va, size))
         return va
 
     def address_free(self, va, size):
         if self.reservations.pop(va) != size:
             raise AssertionError("reservation size mismatch")
+        self.calls.append(("address_free", va, size))
 
     def map(self, va, size, handle):
         if handle not in self.imports and handle not in self.server_handles:
             raise AssertionError("unknown handle")
         self.mapped[va] = size, handle
+        self.calls.append(("map", va, size, handle))
 
     def unmap(self, va, size):
         if self.mapped.pop(va)[0] != size:
             raise AssertionError("mapping size mismatch")
         self.access.pop(va, None)
+        self.calls.append(("unmap", va, size))
 
     def set_access(self, va, size, device, access):
+        if self.fail_access:
+            raise RuntimeError("access failed")
         if self.mapped[va][0] != size:
             raise AssertionError("access size mismatch")
         self.access[va] = access
+        self.calls.append(("access", va, size, device, access))
 
     def validate_pointer(self, va):
         pass

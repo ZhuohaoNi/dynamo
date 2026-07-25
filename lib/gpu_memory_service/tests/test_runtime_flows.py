@@ -46,7 +46,9 @@ from gpu_memory_service.common.protocol.messages import (
     GetEventHistoryResponse,
     GetRuntimeStateRequest,
     GetRuntimeStateResponse,
+    HandshakeRequest,
 )
+from gpu_memory_service.common.protocol.wire import send_message_sync
 from gpu_memory_service.common.vmm import VMMDeviceType
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.fsm import ServerState
@@ -221,7 +223,7 @@ class _WhiteBoxServerThread:
             raise TimeoutError("Timed out disconnecting RW session") from exc
 
     async def _disconnect_rw_session(self) -> None:
-        conn = self.server._gms._sessions._locking.rw_conn
+        conn = self.server._gms._sessions.rw_conn
         if conn is None:
             raise RuntimeError("No active RW session to disconnect")
         await self.server._gms.cleanup_connection(conn)
@@ -272,6 +274,51 @@ def test_rw_commit_publishes_allocations_metadata_and_layout_hash(running_gms):
         assert not writer.is_connected
         _wait_for_server_state(server, ServerState.COMMITTED)
     finally:
+        writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("failure", ["reserve", "access"])
+def test_mapping_install_failure_aborts_writer_epoch(
+    running_gms,
+    failure,
+):
+    server, socket_path = running_gms
+    vmm = server._gms._allocations._vmm
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    exported_fds: list[int] = []
+    export_handle = writer.export_handle
+
+    def capture_export(allocation_id):
+        fd = export_handle(allocation_id)
+        exported_fds.append(fd)
+        return fd
+
+    writer.export_handle = capture_export
+    try:
+        if failure == "reserve":
+            vmm.fail_reserve = True
+        else:
+            vmm.fail_access = True
+
+        with pytest.raises(RuntimeError, match=f"{failure} failed"):
+            writer.create_mapping(size=4096, tag="weights")
+
+        assert len(exported_fds) == 1
+        with pytest.raises(OSError):
+            os.fstat(exported_fds[0])
+        assert not writer.mappings
+        assert not writer.is_connected
+        _wait_for_server_state(server, ServerState.EMPTY)
+        assert server._gms.allocation_count == 0
+        if failure == "reserve":
+            assert not vmm.imports
+            assert not vmm.mapped
+            assert not vmm.reservations
+    finally:
+        vmm.fail_reserve = False
+        vmm.fail_access = False
         writer.close()
 
 
@@ -473,6 +520,35 @@ def test_waiting_writer_blocks_new_readers_until_last_reader_disconnects(
         assert waiting_writer.lock_type == GrantedLockType.RW
     finally:
         waiting_writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_disconnected_queued_writer_preserves_committed_layout(running_gms):
+    server, socket_path = running_gms
+
+    writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
+    allocation_id, _ = writer.allocate(4096, "weights")
+    writer.commit()
+    reader = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+
+    dead_writer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    dead_writer.connect(socket_path)
+    send_message_sync(
+        dead_writer,
+        HandshakeRequest(lock_type=RequestedLockType.RW),
+    )
+    _wait_for_waiting_writers(server, 1)
+    dead_writer.close()
+    _wait_for_waiting_writers(server, 0)
+
+    reader.close()
+    _wait_for_server_state(server, ServerState.COMMITTED)
+    verifier = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+    try:
+        assert verifier.get_allocation(allocation_id).allocation_id == allocation_id
+        assert server._gms.allocation_count == 1
+    finally:
+        verifier.close()
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
@@ -914,7 +990,7 @@ def test_scratch_reallocation_keeps_committed_allocation_on_cuda_granularity(
 
 
 @pytest.mark.asyncio
-async def test_allocation_manager_caches_exported_fd(monkeypatch):
+async def test_allocation_manager_uses_transient_export_fds(monkeypatch):
     export_calls = 0
 
     class _CountingVMM(FakeVMM):
@@ -939,10 +1015,7 @@ async def test_allocation_manager_caches_exported_fd(monkeypatch):
     second_fd = allocations.export_allocation(info.allocation_id)
 
     try:
-        assert export_calls == 1
-        assert info.export_fd >= 0
-        assert first_fd != info.export_fd
-        assert second_fd != info.export_fd
+        assert export_calls == 2
         assert first_fd != second_fd
         os.fstat(first_fd)
         os.fstat(second_fd)

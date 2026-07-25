@@ -56,16 +56,9 @@ async def send_message(writer, msg: Message, fd: int = -1) -> None:
         def do_send_fd():
             raw_fd = transport_sock.fileno()
             dup_fd = os.dup(raw_fd)
-            try:
-                sock = socket.socket(fileno=dup_fd)
-                try:
-                    sock.setblocking(True)
-                    socket.send_fds(sock, [frame], [fd])
-                finally:
-                    sock.detach()
-            except Exception:
-                os.close(dup_fd)
-                raise
+            with socket.socket(fileno=dup_fd) as sock:
+                sock.setblocking(True)
+                socket.send_fds(sock, [frame], [fd])
 
         await asyncio.get_running_loop().run_in_executor(None, do_send_fd)
     else:

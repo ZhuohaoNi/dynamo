@@ -43,9 +43,10 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataPutRequest,
     MetadataPutResponse,
 )
+from gpu_memory_service.core.server.sessions import EpochClearReason
 
 from .allocations import AllocationInfo, GMSAllocationManager
-from .fsm import Connection, ServerState, StateEvent
+from .fsm import Connection, ServerState
 from .session import GMSSessionManager
 
 logger = logging.getLogger(__name__)
@@ -75,10 +76,10 @@ class GMS:
             allocation_retry_interval=allocation_retry_interval,
             allocation_retry_timeout=allocation_retry_timeout,
         )
-        self._sessions = GMSSessionManager()
         self._events: deque[GMSRuntimeEvent] = deque(maxlen=self._MAX_EVENTS)
         self._metadata: dict[str, MetadataEntry] = {}
         self._memory_layout_hash = ""
+        self._sessions = GMSSessionManager(self._clear_epoch)
         logger.info(
             "GMS initialized: device=%d",
             device,
@@ -123,8 +124,14 @@ class GMS:
         mode: RequestedLockType,
         timeout_ms: int | None,
         session_id: str,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> GrantedLockType | None:
-        return await self._sessions.acquire_lock(mode, timeout_ms, session_id)
+        return await self._sessions.acquire_lock(
+            mode,
+            timeout_ms,
+            session_id,
+            is_cancelled,
+        )
 
     async def cancel_connect(
         self,
@@ -196,27 +203,14 @@ class GMS:
         self._memory_layout_hash = ""
         return self._allocations.clear_all()
 
-    def on_connect(self, conn: Connection) -> None:
-        if conn.mode == GrantedLockType.RW:
-            had_committed_layout = self._sessions.snapshot().committed
-            cleared = self._clear_layout_state()
-            if had_committed_layout:
-                self._events.append(
-                    GMSRuntimeEvent(
-                        kind="allocations_cleared",
-                        allocation_count=cleared,
-                    )
-                )
-
-        self._sessions.on_connect(conn)
-        if conn.mode == GrantedLockType.RW:
-            self._events.append(GMSRuntimeEvent(kind="rw_connected"))
-
-    async def cleanup_connection(self, conn: Connection | None) -> None:
-        event = self._sessions.begin_cleanup(conn)
-        if event == StateEvent.RW_ABORT:
+    def _clear_epoch(
+        self,
+        reason: EpochClearReason,
+        replacing_committed: bool,
+    ) -> None:
+        cleared = self._clear_layout_state()
+        if reason == EpochClearReason.ABORT:
             logger.warning("RW aborted; clearing active layout")
-            cleared = self._clear_layout_state()
             self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
             self._events.append(
                 GMSRuntimeEvent(
@@ -224,6 +218,21 @@ class GMS:
                     allocation_count=cleared,
                 )
             )
+        elif replacing_committed:
+            self._events.append(
+                GMSRuntimeEvent(
+                    kind="allocations_cleared",
+                    allocation_count=cleared,
+                )
+            )
+
+    def on_connect(self, conn: Connection) -> None:
+        self._sessions.on_connect(conn)
+        if conn.mode == GrantedLockType.RW:
+            self._events.append(GMSRuntimeEvent(kind="rw_connected"))
+
+    async def cleanup_connection(self, conn: Connection | None) -> None:
+        self._sessions.begin_cleanup(conn)
         await self._sessions.finish_cleanup(conn)
 
     async def handle_request(

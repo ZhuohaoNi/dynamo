@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
+from gpu_memory_service.core.client.torch import (
+    TorchAllocatorCallbacks,
+    create_torch_allocator,
+    create_torch_mem_pool,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -37,6 +42,7 @@ _active_tag: ContextVar[str | None] = ContextVar(
     default=None,
 )
 _callbacks_initialized = False
+_callbacks: TorchAllocatorCallbacks | None = None
 _pluggable_alloc: Any | None = None
 
 
@@ -79,21 +85,18 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
 
 
 def _ensure_callbacks_initialized() -> None:
-    global _callbacks_initialized, _pluggable_alloc
+    global _callbacks, _callbacks_initialized, _pluggable_alloc
 
     if get_vmm_device_type() != VMMDeviceType.CUDA:
         raise NotImplementedError(
             f"GMS torch mempool integration is CUDA-only; device_type={get_vmm_device_type().value} "
         )
 
-    from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
-    from torch.cuda import CUDAPluggableAllocator
-
     if _callbacks_initialized:
         return
 
-    _pluggable_alloc = CUDAPluggableAllocator(cumem.__file__, "my_malloc", "my_free")
-    cumem.init_module(_gms_malloc, _gms_free)
+    _callbacks = TorchAllocatorCallbacks(_gms_malloc, _gms_free)
+    _pluggable_alloc = create_torch_allocator(_callbacks)
     _callbacks_initialized = True
 
 
@@ -103,10 +106,8 @@ def _create_mem_pool() -> "MemPool":
             f"GMS torch mempool integration is CUDA-only; device_type={get_vmm_device_type().value} "
         )
 
-    from torch.cuda.memory import MemPool
-
     assert _pluggable_alloc is not None
-    return MemPool(allocator=_pluggable_alloc.allocator())
+    return create_torch_mem_pool(_pluggable_alloc)
 
 
 def get_or_create_gms_client_memory_manager(
