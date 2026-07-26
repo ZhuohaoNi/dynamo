@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
@@ -137,9 +138,15 @@ def _wait_for_ro_session_count(
 class _WhiteBoxServerThread:
     """Threaded in-process server helper."""
 
-    def __init__(self, server, socket_path: str):
+    def __init__(
+        self,
+        server,
+        socket_path: str,
+        default_executor_workers: int | None = None,
+    ):
         self.server = server
         self.socket_path = socket_path
+        self._default_executor_workers = default_executor_workers
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[None] | None = None
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -149,6 +156,10 @@ class _WhiteBoxServerThread:
         loop = asyncio.new_event_loop()
         self._loop = loop
         asyncio.set_event_loop(loop)
+        if self._default_executor_workers is not None:
+            loop.set_default_executor(
+                ThreadPoolExecutor(max_workers=self._default_executor_workers)
+            )
         self._task = loop.create_task(self.server.serve())
         try:
             loop.run_until_complete(self._task)
@@ -230,7 +241,7 @@ class _WhiteBoxServerThread:
 
 
 @pytest.fixture
-def running_gms(monkeypatch, tmp_path):
+def running_gms(monkeypatch, request, tmp_path):
     fake_vmm = FakeVMM()
 
     # Inject fake VMM into the process-global singleton so that
@@ -240,7 +251,11 @@ def running_gms(monkeypatch, tmp_path):
 
     socket_path = str(tmp_path / "gms.sock")
     server = GMSRPCServer(socket_path, device=0, allocation_retry_interval=0.01)
-    thread = _WhiteBoxServerThread(server, socket_path)
+    thread = _WhiteBoxServerThread(
+        server,
+        socket_path,
+        default_executor_workers=getattr(request, "param", None),
+    )
     thread.start()
     try:
         yield server, socket_path
@@ -520,6 +535,58 @@ def test_waiting_writer_blocks_new_readers_until_last_reader_disconnects(
         assert waiting_writer.lock_type == GrantedLockType.RW
     finally:
         waiting_writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("running_gms", [2], indirect=True)
+def test_queued_lock_contenders_do_not_starve_export_fd(running_gms):
+    server, socket_path = running_gms
+
+    writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
+    allocation_id, _ = writer.allocate(4096, "weights")
+    writer.commit()
+    reader = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+
+    contenders: list[socket.socket] = []
+    exported: dict[str, object] = {}
+
+    def export_allocation() -> None:
+        try:
+            exported["fd"] = reader.export(allocation_id)
+        except BaseException as exc:
+            exported["error"] = exc
+
+    export_thread = threading.Thread(target=export_allocation)
+    try:
+        for _ in range(3):
+            contender = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            contender.connect(socket_path)
+            send_message_sync(
+                contender,
+                HandshakeRequest(lock_type=RequestedLockType.RW),
+            )
+            contenders.append(contender)
+        _wait_for_waiting_writers(server, 3)
+
+        export_thread.start()
+        export_thread.join(timeout=_BLOCKED_WRITER_JOIN_TIMEOUT_SECONDS)
+
+        assert not export_thread.is_alive()
+        assert "error" not in exported
+        exported_fd = exported["fd"]
+        assert isinstance(exported_fd, int)
+        os.fstat(exported_fd)
+    finally:
+        for contender in contenders:
+            contender.close()
+        if export_thread.is_alive():
+            reader.close()
+            export_thread.join(timeout=_BLOCKED_WRITER_JOIN_TIMEOUT_SECONDS)
+        else:
+            reader.close()
+        exported_fd = exported.get("fd")
+        if isinstance(exported_fd, int):
+            os.close(exported_fd)
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
