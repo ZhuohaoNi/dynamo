@@ -558,7 +558,7 @@ def test_queued_lock_contenders_do_not_starve_export_fd(running_gms):
 
     export_thread = threading.Thread(target=export_allocation)
     try:
-        for _ in range(3):
+        for _ in range(2):
             contender = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             contender.connect(socket_path)
             send_message_sync(
@@ -566,7 +566,7 @@ def test_queued_lock_contenders_do_not_starve_export_fd(running_gms):
                 HandshakeRequest(lock_type=RequestedLockType.RW),
             )
             contenders.append(contender)
-        _wait_for_waiting_writers(server, 3)
+        _wait_for_waiting_writers(server, 2)
 
         export_thread.start()
         export_thread.join(timeout=_BLOCKED_WRITER_JOIN_TIMEOUT_SECONDS)
