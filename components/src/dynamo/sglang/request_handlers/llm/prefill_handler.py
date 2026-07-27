@@ -13,8 +13,8 @@ from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_sampling_params as build_engine_generate_sampling_params,
-    clamp_prefill_sampling_params,
 )
+from dynamo.sglang.engine_generate import clamp_prefill_sampling_params
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
