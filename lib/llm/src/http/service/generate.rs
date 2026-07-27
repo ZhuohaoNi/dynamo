@@ -402,8 +402,8 @@ fn preprocessed_from_sglang_generate(
 }
 
 enum IncomingGenerateRequest {
-    Vllm(GenerateRequest),
-    Sglang(SglangGenerateRequest),
+    Vllm(Box<GenerateRequest>),
+    Sglang(Box<SglangGenerateRequest>),
 }
 
 impl IncomingGenerateRequest {
@@ -457,10 +457,10 @@ impl IncomingGenerateRequest {
     ) -> anyhow::Result<PreprocessedRequest> {
         match self {
             Self::Vllm(request) => {
-                preprocessed_from_vllm_generate(request, model, data_parallel_rank, request_id)
+                preprocessed_from_vllm_generate(*request, model, data_parallel_rank, request_id)
             }
             Self::Sglang(request) => {
-                preprocessed_from_sglang_generate(request, model, data_parallel_rank)
+                preprocessed_from_sglang_generate(*request, model, data_parallel_rank)
             }
         }
     }
@@ -482,7 +482,12 @@ async fn handler_vllm_generate(
     headers: HeaderMap,
     Json(request): Json<GenerateRequest>,
 ) -> Response {
-    handle_generate(state, headers, IncomingGenerateRequest::Vllm(request)).await
+    handle_generate(
+        state,
+        headers,
+        IncomingGenerateRequest::Vllm(Box::new(request)),
+    )
+    .await
 }
 
 async fn handler_sglang_generate(
@@ -506,7 +511,12 @@ async fn handler_sglang_generate(
                 .into_response();
         }
     };
-    handle_generate(state, headers, IncomingGenerateRequest::Sglang(request)).await
+    handle_generate(
+        state,
+        headers,
+        IncomingGenerateRequest::Sglang(Box::new(request)),
+    )
+    .await
 }
 
 /// Resolve, route, and dispatch a frontend-native token-in/token-out request.
