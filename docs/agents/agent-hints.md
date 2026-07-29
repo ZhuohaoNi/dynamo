@@ -21,6 +21,7 @@ Use hints only for serving-relevant intent. Use [session IDs](session-ids.md#ses
         "agent_hints": {
             "priority": 5,
             "strict_priority": 1,
+            "priority_load_shed_percent": 20,
             "osl": 1024,
             "speculative_prefill": true
         }
@@ -32,6 +33,7 @@ Use hints only for serving-relevant intent. Use [session IDs](session-ids.md#ses
 |------|-------------|
 | `priority` | Unified request priority. Higher values mean higher priority at the Dynamo API layer; see [Priority Scheduling](../components/router/priority-scheduling.md) for router and backend requirements. |
 | `strict_priority` | Router pending-queue tier. Higher values always precede lower values before the configured queue policy is applied. |
+| `priority_load_shed_percent` | Percentage this request may exceed the router queue-depth caps by. Requires a positive `priority`; backpressure still applies once the stretched cap is reached. |
 | `osl` | Expected output sequence length in tokens. Used by the router for output block tracking and load-balancing accuracy when `--router-track-output-blocks` is enabled. |
 | `speculative_prefill` | When true, Dynamo can prefill the predicted next-turn prefix after the current turn completes to warm the KV cache for the next request. |
 

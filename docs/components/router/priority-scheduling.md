@@ -9,10 +9,11 @@ Priority scheduling lets a client mark one request as more important than anothe
 
 - `nvext.agent_hints.priority` is a soft priority used by router policy scoring and supported backend engines.
 - `nvext.agent_hints.strict_priority` is an unsigned router pending-queue tier. Higher tiers always precede lower tiers.
+- `nvext.agent_hints.priority_load_shed_percent` lets a priority request be admitted against a stretched queue-depth cap.
 
-For HTTP requests, send the same values in `x-dynamo-request-priority` and
-`x-dynamo-request-strict-priority`. Header values override the corresponding `nvext.agent_hints`
-fields.
+For HTTP requests, send the same values in `x-dynamo-request-priority`,
+`x-dynamo-request-strict-priority`, and `x-dynamo-request-priority-load-shed-percent`.
+Header values override the corresponding `nvext.agent_hints` fields.
 
 ```json
 {
@@ -55,6 +56,33 @@ The router queue only matters when requests are held before dispatch. If a reque
 The strict tier is compared first. FCFS, LCFS, or Weighted Shortest Processing Time (WSPT) still computes the secondary key and orders requests within the same tier.
 
 The default policy is `fcfs`, which uses the priority value as a positive arrival-time bump. Higher values move the request earlier in the queue. Negative priority values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come, first-served ordering by sending a negative priority.
+
+### Queue Depth Caps for Priority Traffic
+
+Queue-depth caps configured per policy class apply to normal and priority traffic alike, so a priority request can be rejected at the same pending-queue cap as everything else during a short overload spike.
+
+`priority_load_shed_percent` stretches those caps for one request:
+
+```text
+effective_cap = base_cap + base_cap * priority_load_shed_percent / 100
+```
+
+The boost applies only to that request's admission decision, requires a positive `priority`, and does not change the configured cap. Backpressure still applies once the stretched cap is reached, so this is a bounded relaxation rather than a bypass. The queue rejection reports the effective cap that was applied.
+
+```json
+{
+    "model": "my-model",
+    "messages": [
+        { "role": "user", "content": "Summarize this incident." }
+    ],
+    "nvext": {
+        "agent_hints": {
+            "priority": 10,
+            "priority_load_shed_percent": 20
+        }
+    }
+}
+```
 
 For the flag-level semantics, default value, and backend caveats, see [Router Configuration and Tuning](router-configuration.md#routing-behavior).
 

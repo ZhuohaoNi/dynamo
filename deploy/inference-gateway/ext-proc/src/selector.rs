@@ -49,6 +49,7 @@ pub struct SelectRequest {
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    pub priority_load_shed_percent: Option<u8>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -286,6 +287,7 @@ impl Selector {
             session_id: None,
             priority_jump: req.priority_jump,
             strict_priority: req.strict_priority,
+            priority_load_shed_percent: req.priority_load_shed_percent,
             pinned_worker: None,
             allowed_worker_ids: req.allowed_worker_ids,
             routing_constraints: RoutingConstraints::default(),

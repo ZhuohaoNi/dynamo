@@ -72,6 +72,10 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_priority: Option<u32>,
 
+    /// Percentage this request may exceed the router queue-depth caps by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_load_shed_percent: Option<u8>,
+
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,

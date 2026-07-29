@@ -110,6 +110,12 @@ pub struct AgentHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_priority: Option<u32>,
 
+    /// Percentage this request may exceed the router queue-depth caps by.
+    /// Only applied when the request also carries a positive priority.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_load_shed_percent: Option<u8>,
+
     /// Expected output sequence length.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,6 +248,8 @@ pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+pub const HEADER_REQUEST_PRIORITY_LOAD_SHED_PERCENT: &str =
+    "x-dynamo-request-priority-load-shed-percent";
 pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 // Compatibility aliases for the original unprefixed names. Future agents may remove these after
 // the deprecation window.
@@ -300,6 +308,7 @@ pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffin
 /// - `x-dynamo-prefill-dp-rank` -> `prefill_dp_rank`
 /// - `x-dynamo-request-priority` -> `agent_hints.priority`
 /// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
+/// - `x-dynamo-request-priority-load-shed-percent` -> `agent_hints.priority_load_shed_percent`
 /// - `x-tenant-id` -> `cache_salt`
 ///
 /// Routing headers take priority over existing nvext values when present.
@@ -340,6 +349,11 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .get(HEADER_REQUEST_STRICT_PRIORITY)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
+
+    let priority_load_shed_percent = headers
+        .get(HEADER_REQUEST_PRIORITY_LOAD_SHED_PERCENT)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u8>().ok());
     let tenant_id = headers
         .get(HEADER_TENANT_ID)
         .and_then(|v| v.to_str().ok())
@@ -352,6 +366,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         && prefill_dp_rank.is_none()
         && priority.is_none()
         && strict_priority.is_none()
+        && priority_load_shed_percent.is_none()
         && tenant_id.is_none()
     {
         return nvext;
@@ -371,13 +386,16 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     if let Some(rank) = prefill_dp_rank {
         ext.prefill_dp_rank = Some(rank);
     }
-    if priority.is_some() || strict_priority.is_some() {
+    if priority.is_some() || strict_priority.is_some() || priority_load_shed_percent.is_some() {
         let hints = ext.agent_hints.get_or_insert_with(AgentHints::default);
         if let Some(priority) = priority {
             hints.priority = Some(priority);
         }
         if let Some(strict_priority) = strict_priority {
             hints.strict_priority = Some(strict_priority);
+        }
+        if let Some(percent) = priority_load_shed_percent {
+            hints.priority_load_shed_percent = Some(percent);
         }
     }
     if let Some(salt) = tenant_id {
@@ -766,6 +784,26 @@ mod tests {
     }
 
     #[test]
+    fn agent_hints_priority_load_shed_percent_serde() {
+        let hints: AgentHints =
+            serde_json::from_str(r#"{"priority_load_shed_percent":20}"#).unwrap();
+        assert_eq!(hints.priority_load_shed_percent, Some(20));
+        assert_eq!(
+            serde_json::to_string(&hints).unwrap(),
+            r#"{"priority_load_shed_percent":20}"#
+        );
+
+        assert_eq!(
+            AgentHints::default().priority_load_shed_percent,
+            None,
+            "absent percent must stay unset so the router keeps the base cap"
+        );
+        assert!(
+            serde_json::from_str::<AgentHints>(r#"{"priority_load_shed_percent":256}"#).is_err()
+        );
+    }
+
+    #[test]
     fn shared_nvext_disagg_worker_ids() {
         let nv_ext = NvExt::builder()
             .prefill_worker_id(100)
@@ -853,6 +891,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_REQUEST_PRIORITY, "-3".parse().unwrap());
         headers.insert(HEADER_REQUEST_STRICT_PRIORITY, "7".parse().unwrap());
+        headers.insert(
+            HEADER_REQUEST_PRIORITY_LOAD_SHED_PERCENT,
+            "20".parse().unwrap(),
+        );
 
         let hints = apply_header_routing_overrides(None, &headers)
             .unwrap()
@@ -861,12 +903,15 @@ mod tests {
 
         assert_eq!(hints.priority, Some(-3));
         assert_eq!(hints.strict_priority, Some(7));
+        assert_eq!(hints.priority_load_shed_percent, Some(20));
 
         headers.remove(HEADER_REQUEST_STRICT_PRIORITY);
+        headers.remove(HEADER_REQUEST_PRIORITY_LOAD_SHED_PERCENT);
         let nvext = NvExt {
             agent_hints: Some(AgentHints {
                 priority: Some(1),
                 strict_priority: Some(2),
+                priority_load_shed_percent: Some(30),
                 osl: Some(99),
                 ..Default::default()
             }),
@@ -879,6 +924,7 @@ mod tests {
 
         assert_eq!(hints.priority, Some(-3));
         assert_eq!(hints.strict_priority, Some(2));
+        assert_eq!(hints.priority_load_shed_percent, Some(30));
         assert_eq!(hints.osl, Some(99));
     }
 

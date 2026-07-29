@@ -488,6 +488,7 @@ impl RouterHandles {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        priority_load_shed_percent: u8,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>), QueryRouterResult> {
@@ -504,8 +505,7 @@ impl RouterHandles {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
-                // Lifted from `nvext.agent_hints` by the request-path follow-up.
-                0,
+                priority_load_shed_percent,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -552,6 +552,7 @@ impl RouterHandles {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        priority_load_shed_percent: u8,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
@@ -585,8 +586,7 @@ impl RouterHandles {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
-                // Lifted from `nvext.agent_hints` by the request-path follow-up.
-                0,
+                priority_load_shed_percent,
                 None,
                 None,
                 allowed_worker_ids,
@@ -636,6 +636,13 @@ fn extract_strict_priority(nvext: Option<&NvExt>) -> u32 {
     nvext
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
+        .unwrap_or(0)
+}
+
+fn extract_priority_load_shed_percent(nvext: Option<&NvExt>) -> u8 {
+    nvext
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.priority_load_shed_percent)
         .unwrap_or(0)
 }
 
@@ -1220,12 +1227,12 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 /// the chat template and tokenize, then lift router queue priorities
 /// out of `nvext.agent_hints`.
 ///
-/// Returns `(token_ids, priority_jump, strict_priority, routing_constraints)` on success,
-/// or a `QueryRouterResult` error code. Queue priorities default to zero when
-/// absent. This mirrors the standalone Dynamo preprocessor lift in
-/// `lib/llm/src/preprocessor.rs` so the GAIE/EPP path produces the same queue
-/// ordering as a non-EPP deployment.
-type PreprocessedRequest = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints);
+/// Returns `(token_ids, priority_jump, strict_priority, priority_load_shed_percent,
+/// routing_constraints)` on success, or a `QueryRouterResult` error code. Queue
+/// priorities default to zero when absent. This mirrors the standalone Dynamo
+/// preprocessor lift in `lib/llm/src/preprocessor.rs` so the GAIE/EPP path produces
+/// the same queue ordering as a non-EPP deployment.
+type PreprocessedRequest = (Vec<u32>, Option<String>, f64, u32, u8, RoutingConstraints);
 
 unsafe fn preprocess_request(
     handles: &RouterHandles,
@@ -1262,6 +1269,7 @@ unsafe fn preprocess_request(
         };
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let priority_load_shed_percent = extract_priority_load_shed_percent(request.nvext.as_ref());
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let (token_ids, _) = match handles
@@ -1289,6 +1297,7 @@ unsafe fn preprocess_request(
             cache_namespace,
             priority_jump,
             strict_priority,
+            priority_load_shed_percent,
             routing_constraints,
         ));
     }
@@ -1303,6 +1312,7 @@ unsafe fn preprocess_request(
 
     let priority_jump = extract_priority_jump(request.nvext.as_ref());
     let strict_priority = extract_strict_priority(request.nvext.as_ref());
+    let priority_load_shed_percent = extract_priority_load_shed_percent(request.nvext.as_ref());
     let cache_namespace = request_cache_salt(&request).map(str::to_owned);
     let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
 
@@ -1337,6 +1347,7 @@ unsafe fn preprocess_request(
         cache_namespace,
         priority_jump,
         strict_priority,
+        priority_load_shed_percent,
         routing_constraints,
     ))
 }
@@ -1435,11 +1446,17 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
-        match unsafe { preprocess_request(handles, request_json) } {
-            Ok(t) => t,
-            Err(code) => return code,
-        };
+    let (
+        tokens,
+        cache_namespace,
+        priority_jump,
+        strict_priority,
+        priority_load_shed_percent,
+        routing_constraints,
+    ) = match unsafe { preprocess_request(handles, request_json) } {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
 
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
@@ -1452,6 +1469,7 @@ pub unsafe extern "C" fn route_prefill_request(
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                priority_load_shed_percent,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -1518,11 +1536,17 @@ pub unsafe extern "C" fn route_decode_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
-        match unsafe { preprocess_request(handles, request_json) } {
-            Ok(t) => t,
-            Err(code) => return code,
-        };
+    let (
+        tokens,
+        cache_namespace,
+        priority_jump,
+        strict_priority,
+        priority_load_shed_percent,
+        routing_constraints,
+    ) = match unsafe { preprocess_request(handles, request_json) } {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
 
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
@@ -1534,6 +1558,7 @@ pub unsafe extern "C" fn route_decode_request(
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                priority_load_shed_percent,
                 allowed_worker_ids,
                 routing_constraints,
             )

@@ -211,10 +211,11 @@ impl Router {
 
     /// Tokenize a JSON request body and extract router queue priorities.
     ///
-    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority)`.
-    /// Priorities default to zero when absent. Mirrors the standalone Dynamo
-    /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
+    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority,
+    /// priority_load_shed_percent)`. Priorities default to zero when absent. Mirrors
+    /// the standalone Dynamo preprocessor lift in `lib/llm/src/preprocessor.rs`.
+    #[allow(clippy::type_complexity)]
+    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32, u8)> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
@@ -223,6 +224,7 @@ impl Router {
 
         let priority_jump = extract_priority_jump(&request);
         let strict_priority = extract_strict_priority(&request);
+        let priority_load_shed_percent = extract_priority_load_shed_percent(&request);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let formatted_prompt = self
@@ -236,6 +238,7 @@ impl Router {
             cache_namespace,
             priority_jump,
             strict_priority,
+            priority_load_shed_percent,
         ))
     }
 
@@ -316,6 +319,7 @@ impl Router {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        priority_load_shed_percent: u8,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(u64, Option<u32>)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -333,8 +337,7 @@ impl Router {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
-                // Lifted from `nvext.agent_hints` by the request-path follow-up.
-                0,
+                priority_load_shed_percent,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
             )
@@ -358,6 +361,7 @@ impl Router {
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary tier.
+    #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
         tokens: &[u32],
@@ -365,6 +369,7 @@ impl Router {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        priority_load_shed_percent: u8,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(WorkerWithDpRank, u32)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -384,8 +389,7 @@ impl Router {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
-                // Lifted from `nvext.agent_hints` by the request-path follow-up.
-                0,
+                priority_load_shed_percent,
                 None,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
@@ -517,6 +521,17 @@ fn extract_strict_priority(
         .as_ref()
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
+        .unwrap_or(0)
+}
+
+fn extract_priority_load_shed_percent(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> u8 {
+    request
+        .nvext
+        .as_ref()
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.priority_load_shed_percent)
         .unwrap_or(0)
 }
 
@@ -937,7 +952,13 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, body_cache_namespace, priority_jump, strict_priority) = self
+        let (
+            tokens,
+            body_cache_namespace,
+            priority_jump,
+            strict_priority,
+            priority_load_shed_percent,
+        ) = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
@@ -953,6 +974,7 @@ impl EndpointPicker for Router {
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                priority_load_shed_percent,
                 allowed_worker_ids.clone(),
             )
             .await;
@@ -979,6 +1001,7 @@ impl EndpointPicker for Router {
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                priority_load_shed_percent,
                 allowed_worker_ids,
             )
             .await
@@ -1194,5 +1217,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(extract_strict_priority(&without_nvext), 0);
+    }
+
+    #[test]
+    fn priority_load_shed_percent_lifted_from_agent_hints() {
+        let with_percent: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "nvext": {"agent_hints": {"priority": 5, "priority_load_shed_percent": 20}}
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(extract_priority_load_shed_percent(&with_percent), 20);
+
+        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(extract_priority_load_shed_percent(&without_nvext), 0);
     }
 }

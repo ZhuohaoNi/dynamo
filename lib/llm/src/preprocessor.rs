@@ -87,15 +87,23 @@ pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
-fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
+fn routing_priorities(
+    hints: Option<&AgentHints>,
+) -> (Option<f64>, Option<u32>, Option<u8>, Option<i32>) {
     let priority_jump = hints.and_then(|h| {
         h.priority
             .map(|priority| priority.max(0) as f64)
             .or(h.latency_sensitivity)
     });
     let strict_priority = hints.and_then(|h| h.strict_priority);
+    let priority_load_shed_percent = hints.and_then(|h| h.priority_load_shed_percent);
     let priority = hints.and_then(|h| h.priority);
-    (priority_jump, strict_priority, priority)
+    (
+        priority_jump,
+        strict_priority,
+        priority_load_shed_percent,
+        priority,
+    )
 }
 
 fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
@@ -1124,7 +1132,8 @@ impl OpenAIPreprocessor {
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
             let hints = nvext.agent_hints.as_ref();
-            let (priority_jump, strict_priority, priority) = routing_priorities(hints);
+            let (priority_jump, strict_priority, priority_load_shed_percent, priority) =
+                routing_priorities(hints);
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
@@ -1135,6 +1144,7 @@ impl OpenAIPreprocessor {
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump,
                 strict_priority,
+                priority_load_shed_percent,
                 priority,
                 lora_name,
                 cache_namespace: cache_namespace.clone(),
@@ -4059,14 +4069,15 @@ mod tests {
         let hints = crate::protocols::common::extensions::AgentHints {
             priority: Some(-3),
             strict_priority: Some(7),
+            priority_load_shed_percent: Some(20),
             ..Default::default()
         };
 
         assert_eq!(
             routing_priorities(Some(&hints)),
-            (Some(0.0), Some(7), Some(-3))
+            (Some(0.0), Some(7), Some(20), Some(-3))
         );
-        assert_eq!(routing_priorities(None), (None, None, None));
+        assert_eq!(routing_priorities(None), (None, None, None, None));
     }
 
     fn test_llm_metrics_annotation() -> LLMMetricAnnotation {

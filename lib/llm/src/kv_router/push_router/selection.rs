@@ -62,6 +62,7 @@ struct BestMatchArgs<'a> {
     cache_namespace: Option<String>,
     priority_jump: f64,
     strict_priority: u32,
+    priority_load_shed_percent: u8,
     policy_class: Option<String>,
     session_id: Option<String>,
     expected_output_tokens: Option<u32>,
@@ -85,8 +86,7 @@ impl KvPushRouter {
                 args.cache_namespace,
                 args.priority_jump,
                 args.strict_priority,
-                // Lifted from `nvext.agent_hints` by the request-path follow-up.
-                0,
+                args.priority_load_shed_percent,
                 args.policy_class,
                 args.session_id,
                 args.expected_output_tokens,
@@ -136,6 +136,9 @@ impl KvPushRouter {
         let strict_priority = routing
             .and_then(|routing| routing.strict_priority)
             .unwrap_or(0);
+        let priority_load_shed_percent = routing
+            .and_then(|routing| routing.priority_load_shed_percent)
+            .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
         let return_routing_hashes =
@@ -165,6 +168,7 @@ impl KvPushRouter {
                     cache_namespace,
                     priority_jump,
                     strict_priority,
+                    priority_load_shed_percent,
                     policy_class,
                     session_id,
                     expected_output_tokens,
@@ -237,6 +241,7 @@ impl KvPushRouter {
             cache_namespace,
             priority_jump,
             strict_priority,
+            priority_load_shed_percent,
             policy_class,
             session_id,
             expected_output_tokens,

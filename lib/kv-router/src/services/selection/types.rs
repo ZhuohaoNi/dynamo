@@ -408,6 +408,8 @@ pub struct SelectRequest {
     #[serde(default)]
     pub strict_priority: Option<u32>,
     #[serde(default)]
+    pub priority_load_shed_percent: Option<u8>,
+    #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
@@ -435,6 +437,8 @@ pub struct SelectAndReserveRequest {
     pub priority_jump: Option<f64>,
     #[serde(default)]
     pub strict_priority: Option<u32>,
+    #[serde(default)]
+    pub priority_load_shed_percent: Option<u8>,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]

@@ -131,6 +131,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 |-------|------|---------|-------------|
 | `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
 | `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values. Unset is equivalent to `0`. |
+| `priority_load_shed_percent` | `u8` | `None` | Percentage this request may exceed the router queue-depth caps by. Requires a positive `priority`. Unset is equivalent to `0`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
@@ -170,6 +171,35 @@ new arrival from being admitted directly while other requests are parked.
     "nvext": {
         "agent_hints": {
             "strict_priority": 2
+        }
+    }
+}
+```
+
+### `priority_load_shed_percent`
+
+Router queue-depth caps (`request_queue_limit_per_worker`,
+`raw_isl_token_queue_limit_per_worker`, and `cached_token_queue_limit_per_worker`)
+apply to normal and priority traffic alike. `priority_load_shed_percent` lets a
+single request be admitted against a stretched cap:
+
+```text
+effective_cap = base_cap + base_cap * priority_load_shed_percent / 100
+```
+
+The boost applies only to that request's admission decision. It never mutates the
+configured cap, and the request is still rejected with backpressure once the
+stretched cap is reached, so overload stays bounded.
+
+The hint is ignored unless the request also carries a positive `priority`, so
+normal traffic cannot opt into a deeper queue.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "priority": 5,
+            "priority_load_shed_percent": 20
         }
     }
 }
